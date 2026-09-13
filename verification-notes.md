@@ -1,0 +1,5 @@
+# Visual verification notes
+
+The desktop full-page preview renders the intended signal/lab visual system: dark navy metric cards, mint accents, responsive white analytics cards, a green AI advisory panel, audience source bars, and a dark model-notes panel. The live dashboard query returns a populated 33.4k unique reach estimate with a 32.5k–34.4k interval and two drop event chips. The initial viewport screenshot showed the retention chart curve; the full-page capture showed its grid and axes but not the curve, likely due the screenshot renderer capturing an offscreen SVG while scrolling. A later viewport capture should be used to confirm the chart in-view. The only runtime message is the expected missing auth session for the demo workspace; the data query is public and verified with curl.
+
+The desktop viewport confirms the retention curve renders in view, metric cards are balanced in a four-column layout, and the advisory panel aligns beside the chart. The mobile viewport confirms the navigation collapses to a menu button, the headline wraps cleanly, and metric cards stack without clipping.

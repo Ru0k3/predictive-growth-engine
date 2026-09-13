@@ -1,4 +1,4 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
+import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, json, bigint } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
@@ -25,4 +25,24 @@ export const users = mysqlTable("users", {
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 
-// TODO: Add your tables here
+export const audienceSnapshots = mysqlTable("audience_snapshots", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  channel: varchar("channel", { length: 64 }).notNull(),
+  reach: bigint("reach", { mode: "number" }).notNull(),
+  demographicVector: json("demographicVector").notNull(),
+  observedAt: timestamp("observedAt").defaultNow().notNull(),
+  source: varchar("source", { length: 128 }).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export const analysisRuns = mysqlTable("analysis_runs", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  modelVersion: varchar("modelVersion", { length: 64 }).notNull(),
+  result: json("result").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type AudienceSnapshot = typeof audienceSnapshots.$inferSelect;
+export type AnalysisRun = typeof analysisRuns.$inferSelect;
