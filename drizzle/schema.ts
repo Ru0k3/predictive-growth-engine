@@ -44,5 +44,48 @@ export const analysisRuns = mysqlTable("analysis_runs", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
+export const connectedChannels = mysqlTable("connected_channels", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  provider: varchar("provider", { length: 32 }).notNull(),
+  externalAccountId: varchar("externalAccountId", { length: 128 }).notNull(),
+  accountName: varchar("accountName", { length: 255 }).notNull(),
+  accessTokenEncrypted: text("accessTokenEncrypted").notNull(),
+  refreshTokenEncrypted: text("refreshTokenEncrypted"),
+  accessTokenExpiresAt: timestamp("accessTokenExpiresAt"),
+  refreshTokenExpiresAt: timestamp("refreshTokenExpiresAt"),
+  scopes: text("scopes"),
+  lastSyncedAt: timestamp("lastSyncedAt"),
+  status: varchar("status", { length: 32 }).default("connected").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export const contentAssets = mysqlTable("content_assets", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  mimeType: varchar("mimeType", { length: 128 }).notNull(),
+  storageKey: text("storageKey").notNull(),
+  contentText: text("contentText"),
+  structuralOutline: json("structuralOutline"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export const evidenceEvents = mysqlTable("evidence_events", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  assetId: int("assetId").notNull(),
+  eventType: varchar("eventType", { length: 32 }).notNull(),
+  position: varchar("position", { length: 64 }).notNull(),
+  magnitude: varchar("magnitude", { length: 64 }).notNull(),
+  label: varchar("label", { length: 255 }).notNull(),
+  evidenceText: text("evidenceText"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
 export type AudienceSnapshot = typeof audienceSnapshots.$inferSelect;
 export type AnalysisRun = typeof analysisRuns.$inferSelect;
+export type ConnectedChannel = typeof connectedChannels.$inferSelect;
+export type ContentAsset = typeof contentAssets.$inferSelect;
+export type EvidenceEvent = typeof evidenceEvents.$inferSelect;

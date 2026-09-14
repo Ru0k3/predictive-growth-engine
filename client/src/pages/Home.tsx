@@ -11,12 +11,14 @@ import {
   FlaskConical,
   Gauge,
   LockKeyhole,
+  Link2,
   Menu,
   Radio,
   RefreshCw,
   ShieldCheck,
   Sparkles,
   Target,
+  UploadCloud,
   Users,
   X,
 } from "lucide-react";
@@ -87,6 +89,14 @@ function MetricCard({
 export default function Home() {
   const { user, isAuthenticated, logout } = useAuth();
   const { data, isLoading, refetch } = trpc.analysis.dashboard.useQuery();
+  const connections = trpc.connections.list.useQuery();
+  const providerConfig = trpc.connections.config.useQuery();
+  const startConnection = trpc.connections.start.useMutation();
+  const disconnectConnection = trpc.connections.disconnect.useMutation({ onSuccess: () => connections.refetch() });
+  const contentAssets = trpc.content.list.useQuery(undefined, { enabled: isAuthenticated });
+  const uploadContent = trpc.content.upload.useMutation({ onSuccess: () => contentAssets.refetch() });
+  const [selectedAssetId, setSelectedAssetId] = useState<number | null>(null);
+  const evidence = trpc.content.evidence.useQuery({ assetId: selectedAssetId ?? 0 }, { enabled: Boolean(selectedAssetId && isAuthenticated) });
   const advisory = trpc.analysis.advisory.useMutation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
@@ -118,6 +128,34 @@ export default function Home() {
         ? "Compressed retention event from the latest content performance snapshot."
         : "Aggregate cross-channel reach snapshot.",
     });
+  };
+
+  const connectProvider = async (provider: "youtube" | "instagram" | "tiktok") => {
+    if (!isAuthenticated) {
+      startLogin();
+      return;
+    }
+    try {
+      const result = await startConnection.mutateAsync({ provider, origin: window.location.origin });
+      window.location.assign(result.url);
+    } catch (error) {
+      console.error("Unable to start provider connection", error);
+    }
+  };
+
+  const uploadFile = async (file: File) => {
+    if (!isAuthenticated) {
+      startLogin();
+      return;
+    }
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    const result = await uploadContent.mutateAsync({ name: file.name, mimeType: file.type || "text/plain", base64 });
+    setSelectedAssetId(result.id);
   };
 
   return (
@@ -248,6 +286,29 @@ export default function Home() {
               <Database size={14} /> {snapshot.freshness}
             </div>
           </div>
+
+          <Card className="mb-7 border-0 bg-[#101923] text-white shadow-[0_16px_50px_rgba(39,56,72,.12)]">
+            <CardContent className="p-5 sm:p-6">
+              <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-center">
+                <div>
+                  <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#7c8b9d]"><Link2 size={13} className="text-[#a6f1c6]" /> Live channel connections</div>
+                  <h2 className="text-lg font-semibold tracking-[-0.02em]">Bring the native signal in.</h2>
+                  <p className="mt-1 max-w-xl text-xs leading-relaxed text-[#8998aa]">Connect professional accounts to replace demo fixtures with aggregate reach, impressions, and audience metrics. Tokens are encrypted at rest.</p>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {([
+                    ["youtube", "YouTube", providerConfig.data?.youtube],
+                    ["instagram", "Instagram", providerConfig.data?.instagram],
+                    ["tiktok", "TikTok", providerConfig.data?.tiktok],
+                  ] as const).map(([provider, label, configured]) => {
+                    const connected = connections.data?.some((connection) => connection.provider === provider);
+                    return <button key={provider} onClick={() => connectProvider(provider)} disabled={startConnection.isPending || (!configured && !connected)} className={`flex min-w-[118px] items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left transition ${connected ? "border-[#87d9a8]/40 bg-[#1d5a3b]" : configured ? "border-white/10 bg-white/[.05] hover:border-[#a6f1c6]/50 hover:bg-white/[.09]" : "cursor-not-allowed border-white/5 bg-white/[.03] opacity-70"}`}><span><span className="block text-xs font-medium">{label}</span><span className="mt-1 block text-[10px] text-[#90a2b3]">{connected ? "Connected" : configured ? "Connect" : "Needs app keys"}</span></span><span className={`h-2 w-2 rounded-full ${connected ? "bg-[#a6f1c6]" : configured ? "bg-[#f6c980]" : "bg-[#637385]"}`} /></button>;
+                  })}
+                </div>
+              </div>
+              {connections.data?.length ? <div className="mt-4 flex flex-wrap gap-2 border-t border-white/10 pt-4">{connections.data.map((connection) => <button key={connection.id} onClick={() => disconnectConnection.mutate({ id: connection.id })} className="flex items-center gap-2 rounded-lg border border-white/10 px-2.5 py-1.5 text-[10px] text-[#9aabba] hover:border-[#f49c9c]/40 hover:text-[#ffd0d0]">Disconnect {connection.accountName}<span className="text-[#718397]">· revoke token</span></button>)}</div> : null}
+            </CardContent>
+          </Card>
 
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <MetricCard
@@ -388,6 +449,36 @@ export default function Home() {
               </CardContent>
             </Card>
           </div>
+
+          <Card className="mt-7 border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
+            <CardHeader className="flex-row items-start justify-between gap-4">
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8895a0]"><UploadCloud size={13} className="text-[#4a9b71]" /> Content evidence lab</div>
+                <CardTitle className="text-lg tracking-[-0.02em] text-[#22303d]">Upload the source. Retrieve the proof.</CardTitle>
+                <p className="mt-2 max-w-2xl text-xs leading-relaxed text-[#71808d]">Drop a transcript, Markdown brief, or text export. The engine stores the original securely, builds a structural outline, and lets the advisory layer retrieve the exact surrounding evidence.</p>
+              </div>
+              <label className={`flex shrink-0 cursor-pointer items-center gap-2 rounded-xl px-3 py-2.5 text-xs font-medium transition ${isAuthenticated ? "bg-[#1b5a3a] text-white hover:bg-[#14462d]" : "bg-[#edf3f0] text-[#4a9b71]"}`}>
+                <UploadCloud size={15} /> {uploadContent.isPending ? "Indexing…" : "Upload content"}
+                <input type="file" className="hidden" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" disabled={uploadContent.isPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFile(file); event.currentTarget.value = ""; }} />
+              </label>
+            </CardHeader>
+            <CardContent>
+              {!isAuthenticated && <div className="mb-4 rounded-xl border border-[#dce9e1] bg-[#f7fbf8] p-3 text-xs text-[#5d7567]">Sign in to upload content and keep its evidence private to your workspace.</div>}
+              <div className="grid gap-4 lg:grid-cols-[.8fr_1.2fr]">
+                <div className="rounded-2xl border border-dashed border-[#cbded2] bg-[#f8fbf9] p-4">
+                  <div className="mb-3 flex items-center justify-between"><span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#789087]">Indexed assets</span><span className="rounded-full bg-[#e5f4e9] px-2 py-1 text-[10px] font-semibold text-[#438360]">{contentAssets.data?.length ?? 0}</span></div>
+                  <div className="space-y-2">
+                    {(contentAssets.data ?? []).map((asset) => <button key={asset.id} onClick={() => setSelectedAssetId(asset.id)} className={`flex w-full items-center justify-between rounded-xl px-3 py-3 text-left transition ${selectedAssetId === asset.id ? "bg-[#dcefe3]" : "bg-white hover:bg-[#eef7f1]"}`}><span className="min-w-0"><span className="block truncate text-xs font-medium text-[#344b3e]">{asset.name}</span><span className="mt-1 block text-[10px] text-[#82968b]">{asset.mimeType}</span></span><ChevronRight size={14} className="shrink-0 text-[#91a99b]" /></button>)}
+                    {(contentAssets.data ?? []).length === 0 && <div className="py-7 text-center text-xs leading-relaxed text-[#8b9b92]">No indexed content yet.<br />Upload a text source to begin.</div>}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-[#e1e7e4] bg-white p-4">
+                  <div className="mb-3 flex items-center justify-between"><span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#789087]">Evidence retrieval</span>{evidence.data?.events?.length ? <Badge className="border-0 bg-[#fff2df] text-[10px] text-[#9a6b2e]">{evidence.data.events.length} events</Badge> : null}</div>
+                  {evidence.data ? <><div className="mb-3 text-xs font-medium text-[#344b3e]">{evidence.data.asset.name}</div><div className="max-h-32 overflow-auto rounded-xl bg-[#f6f9f7] p-3 text-xs leading-relaxed text-[#60746a]">{evidence.data.evidence.text || "No nearby evidence found."}</div><div className="mt-3 flex flex-wrap gap-2">{evidence.data.events.slice(0, 4).map((event) => <span key={event.id} className="rounded-lg border border-[#e4ebe7] bg-white px-2.5 py-1.5 text-[10px] text-[#6b8275]">{event.label}</span>)}</div></> : <div className="flex min-h-[132px] items-center justify-center text-center text-xs leading-relaxed text-[#97a49d]">Select an indexed asset to retrieve<br />the nearest complete evidence window.</div>}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
 
           <footer className="mt-10 flex flex-col justify-between gap-3 border-t border-[#dde4e7] pt-5 text-[10px] text-[#8a97a1] sm:flex-row"><div className="flex items-center gap-2"><ShieldCheck size={13} className="text-[#4a9b71]" />Privacy-first by default · aggregate data only</div><div className="flex items-center gap-4"><span>Last updated {snapshot.refreshedAt ? new Date(snapshot.refreshedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</span><a href="#" className="flex items-center gap-1 hover:text-[#4a9b71]">Methodology <ExternalLink size={11} /></a></div></footer>
         </div>

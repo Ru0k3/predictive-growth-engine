@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { desc, eq, and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users } from "../drizzle/schema";
+import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -89,4 +89,102 @@ export async function getUserByOpenId(openId: string) {
   return result.length > 0 ? result[0] : undefined;
 }
 
-// TODO: add feature queries here as your schema grows.
+export async function listConnectedChannels(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    id: connectedChannels.id,
+    provider: connectedChannels.provider,
+    externalAccountId: connectedChannels.externalAccountId,
+    accountName: connectedChannels.accountName,
+    scopes: connectedChannels.scopes,
+    accessTokenExpiresAt: connectedChannels.accessTokenExpiresAt,
+    lastSyncedAt: connectedChannels.lastSyncedAt,
+    status: connectedChannels.status,
+  }).from(connectedChannels).where(eq(connectedChannels.userId, userId)).orderBy(desc(connectedChannels.updatedAt));
+}
+
+export async function createAudienceSnapshot(values: typeof audienceSnapshots.$inferInsert) {
+  const db = await getDb();
+  if (!db) return;
+  await db.insert(audienceSnapshots).values(values);
+}
+
+export async function getConnectedChannel(userId: number, provider: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(connectedChannels).where(and(eq(connectedChannels.userId, userId), eq(connectedChannels.provider, provider))).limit(1);
+  return rows[0];
+}
+
+export async function getConnectedChannelById(userId: number, id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(connectedChannels).where(and(eq(connectedChannels.userId, userId), eq(connectedChannels.id, id))).limit(1);
+  return rows[0];
+}
+
+export async function upsertConnectedChannel(values: typeof connectedChannels.$inferInsert) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  const existing = await db.select({ id: connectedChannels.id }).from(connectedChannels)
+    .where(and(eq(connectedChannels.userId, values.userId), eq(connectedChannels.provider, values.provider ?? ""))).limit(1);
+  const updateSet = {
+    externalAccountId: values.externalAccountId,
+    accountName: values.accountName,
+    accessTokenEncrypted: values.accessTokenEncrypted,
+    refreshTokenEncrypted: values.refreshTokenEncrypted,
+    accessTokenExpiresAt: values.accessTokenExpiresAt,
+    refreshTokenExpiresAt: values.refreshTokenExpiresAt,
+    scopes: values.scopes,
+    status: "connected" as const,
+    lastSyncedAt: values.lastSyncedAt,
+    updatedAt: new Date(),
+  };
+  if (existing[0]) await db.update(connectedChannels).set(updateSet).where(eq(connectedChannels.id, existing[0].id));
+  else await db.insert(connectedChannels).values(values);
+}
+
+export async function updateConnectedChannel(id: number, values: Partial<typeof connectedChannels.$inferInsert>) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  await db.update(connectedChannels).set({ ...values, updatedAt: new Date() }).where(eq(connectedChannels.id, id));
+}
+
+export async function deleteConnectedChannel(userId: number, id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  await db.delete(connectedChannels).where(and(eq(connectedChannels.userId, userId), eq(connectedChannels.id, id)));
+}
+
+export async function createContentAsset(values: typeof contentAssets.$inferInsert) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  const result = await db.insert(contentAssets).values(values);
+  return Number(result[0].insertId);
+}
+
+export async function getContentAsset(userId: number, id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(contentAssets).where(and(eq(contentAssets.userId, userId), eq(contentAssets.id, id))).limit(1);
+  return rows[0];
+}
+
+export async function listContentAssets(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(contentAssets).where(eq(contentAssets.userId, userId)).orderBy(desc(contentAssets.createdAt));
+}
+
+export async function createEvidenceEvents(values: Array<typeof evidenceEvents.$inferInsert>) {
+  const db = await getDb();
+  if (!db || values.length === 0) return;
+  await db.insert(evidenceEvents).values(values);
+}
+
+export async function listEvidenceEvents(userId: number, assetId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(evidenceEvents).where(and(eq(evidenceEvents.userId, userId), eq(evidenceEvents.assetId, assetId))).orderBy(evidenceEvents.position);
+}
