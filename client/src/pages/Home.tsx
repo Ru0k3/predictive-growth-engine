@@ -18,6 +18,7 @@ import {
   ShieldCheck,
   Sparkles,
   Target,
+  Timer,
   UploadCloud,
   Users,
   X,
@@ -97,6 +98,8 @@ export default function Home() {
   const uploadContent = trpc.content.upload.useMutation({ onSuccess: () => contentAssets.refetch() });
   const [selectedAssetId, setSelectedAssetId] = useState<number | null>(null);
   const evidence = trpc.content.evidence.useQuery({ assetId: selectedAssetId ?? 0 }, { enabled: Boolean(selectedAssetId && isAuthenticated) });
+  const [targetedProvider, setTargetedProvider] = useState<"youtube" | "instagram" | "tiktok">("youtube");
+  const targeted = trpc.analysis.targeted.useQuery({ provider: targetedProvider, windowDays: 28 }, { enabled: Boolean(isAuthenticated && connections.data?.some((connection) => connection.provider === targetedProvider)) });
   const advisory = trpc.analysis.advisory.useMutation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
@@ -341,6 +344,11 @@ export default function Home() {
             />
           </div>
 
+          <Card className="mt-7 border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
+            <CardHeader className="flex-row items-start justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8895a0]"><Activity size={13} className="text-[#4a9b71]" /> Targeted video signals</div><CardTitle className="text-lg tracking-[-0.02em] text-[#22303d]">Retention and release-level detail</CardTitle><p className="mt-2 text-xs text-[#71808d]">Provider-native video metrics with explicit retention availability.</p></div><div className="flex gap-2">{(["youtube", "instagram", "tiktok"] as const).map((provider) => <button key={provider} onClick={() => setTargetedProvider(provider)} className={`rounded-lg px-3 py-2 text-[10px] font-semibold capitalize ${targetedProvider === provider ? "bg-[#dcefe3] text-[#27744b]" : "bg-[#f5f8f6] text-[#87968e]"}`}>{provider}</button>)}</div></CardHeader>
+            <CardContent>{targeted.data ? <><div className="mb-4 flex items-center gap-2 rounded-xl bg-[#f7faf8] p-3 text-xs text-[#5d7567]"><Timer size={14} className="text-[#4a9b71]" />{targeted.data.retentionNote}<span className="ml-auto text-[10px] text-[#8a9a92]">{targeted.data.windowDays}d</span></div><div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left"><thead><tr className="border-b border-[#e8eeea] text-[10px] uppercase tracking-[0.14em] text-[#8a9991]"><th className="pb-3">Video</th><th className="pb-3">Views / reach</th><th className="pb-3">Engagement</th><th className="pb-3">Retention</th></tr></thead><tbody>{targeted.data.videos.slice(0, 6).map((video) => <tr key={video.id} className="border-b border-[#f0f3f1] last:border-0"><td className="max-w-[280px] truncate py-3 pr-4 text-xs font-medium text-[#344b3e]">{video.title}</td><td className="py-3 pr-4 text-xs text-[#60746a]">{formatReach(video.views)}{video.reach ? ` / ${formatReach(video.reach)}` : ""}</td><td className="py-3 pr-4 text-xs text-[#60746a]">{formatReach(video.likes + video.comments + (video.shares ?? 0))}</td><td className="py-3 text-xs font-medium text-[#438360]">{video.averageRetentionPercent ? `${video.averageRetentionPercent.toFixed(1)}%` : "Not exposed"}</td></tr>)}</tbody></table></div></> : <div className="rounded-xl border border-dashed border-[#cbded2] bg-[#f8fbf9] p-6 text-center text-xs text-[#8b9b92]">Connect the selected provider to load targeted metrics.</div>}</CardContent>
+          </Card>
+
           <div className="mt-7 grid gap-6 xl:grid-cols-[minmax(0,1.65fr)_minmax(330px,.8fr)]">
             <Card className="border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
               <CardHeader className="flex-row items-start justify-between pb-2">
@@ -455,11 +463,11 @@ export default function Home() {
               <div>
                 <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8895a0]"><UploadCloud size={13} className="text-[#4a9b71]" /> Content evidence lab</div>
                 <CardTitle className="text-lg tracking-[-0.02em] text-[#22303d]">Upload the source. Retrieve the proof.</CardTitle>
-                <p className="mt-2 max-w-2xl text-xs leading-relaxed text-[#71808d]">Drop a transcript, Markdown brief, or text export. The engine stores the original securely, builds a structural outline, and lets the advisory layer retrieve the exact surrounding evidence.</p>
+                <p className="mt-2 max-w-2xl text-xs leading-relaxed text-[#71808d]">Drop a transcript, Markdown brief, PDF, or video/audio file. The engine extracts text or media metadata and preserves evidence for retrieval.</p>
               </div>
               <label className={`flex shrink-0 cursor-pointer items-center gap-2 rounded-xl px-3 py-2.5 text-xs font-medium transition ${isAuthenticated ? "bg-[#1b5a3a] text-white hover:bg-[#14462d]" : "bg-[#edf3f0] text-[#4a9b71]"}`}>
                 <UploadCloud size={15} /> {uploadContent.isPending ? "Indexing…" : "Upload content"}
-                <input type="file" className="hidden" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" disabled={uploadContent.isPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFile(file); event.currentTarget.value = ""; }} />
+                <input type="file" className="hidden" accept=".txt,.md,.markdown,.json,.srt,.vtt,.pdf,.mp4,.mov,.webm,.m4a,.mp3,.wav,text/plain,text/markdown,application/json,application/pdf,video/*,audio/*" disabled={uploadContent.isPending} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFile(file); event.currentTarget.value = ""; }} />
               </label>
             </CardHeader>
             <CardContent>

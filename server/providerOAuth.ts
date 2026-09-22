@@ -2,7 +2,7 @@ import { parse as parseCookieHeader } from "cookie";
 import type { Express, Request, Response } from "express";
 import { createContext } from "./_core/context";
 import * as db from "./db";
-import { decryptSecret, encryptSecret, exchangeProviderCode, fetchAggregateSnapshot, Provider, refreshProviderToken } from "./providers";
+import { decryptSecret, encryptSecret, exchangeProviderCode, fetchAggregateSnapshot, Provider, ProviderCredentials, refreshProviderToken } from "./providers";
 
 const STATE_COOKIE = "__Host-provider_oauth_state";
 const PROVIDER_COOKIE = "__Host-provider_oauth_provider";
@@ -38,7 +38,9 @@ export function registerProviderOAuthRoutes(app: Express) {
         return;
       }
       const redirectUri = `${origin}/api/provider-oauth/callback`;
-      const token = await exchangeProviderCode(provider, code, redirectUri);
+      const configured = await db.getProviderSettings(context.user.id, provider);
+      const credentials: ProviderCredentials | undefined = configured ? { clientId: decryptSecret(configured.clientIdEncrypted), clientSecret: decryptSecret(configured.clientSecretEncrypted), scopes: configured.scopes?.split(",").filter(Boolean) } : undefined;
+      const token = await exchangeProviderCode(provider, code, redirectUri, credentials);
       const snapshot = await fetchAggregateSnapshot(provider, token.access_token);
       const now = Date.now();
       await db.createAudienceSnapshot({ userId: context.user.id, channel: snapshot.provider, reach: snapshot.reach, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
@@ -65,10 +67,10 @@ export function registerProviderOAuthRoutes(app: Express) {
   });
 }
 
-export async function refreshConnectionIfNeeded(channel: any) {
+export async function refreshConnectionIfNeeded(channel: any, credentials?: ProviderCredentials) {
   if (!channel.accessTokenExpiresAt || channel.accessTokenExpiresAt.getTime() > Date.now() + 5 * 60 * 1000) return channel;
   if (!channel.refreshTokenEncrypted) return channel;
-  const token = await refreshProviderToken(channel.provider as Provider, decryptSecret(channel.refreshTokenEncrypted));
+  const token = await refreshProviderToken(channel.provider as Provider, decryptSecret(channel.refreshTokenEncrypted), credentials);
   await db.updateConnectedChannel(channel.id, {
     accessTokenEncrypted: encryptSecret(token.access_token),
     refreshTokenEncrypted: token.refresh_token ? encryptSecret(token.refresh_token) : channel.refreshTokenEncrypted,

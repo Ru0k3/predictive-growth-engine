@@ -1,6 +1,6 @@
 import { desc, eq, and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots } from "../drizzle/schema";
+import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots, providerSettings } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -122,6 +122,34 @@ export async function getConnectedChannelById(userId: number, id: number) {
   if (!db) return undefined;
   const rows = await db.select().from(connectedChannels).where(and(eq(connectedChannels.userId, userId), eq(connectedChannels.id, id))).limit(1);
   return rows[0];
+}
+
+export async function listProviderSettings(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ id: providerSettings.id, provider: providerSettings.provider, redirectUri: providerSettings.redirectUri, scopes: providerSettings.scopes, enabled: providerSettings.enabled, updatedAt: providerSettings.updatedAt }).from(providerSettings).where(eq(providerSettings.userId, userId)).orderBy(desc(providerSettings.updatedAt));
+}
+
+export async function getProviderSettings(userId: number, provider: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(providerSettings).where(and(eq(providerSettings.userId, userId), eq(providerSettings.provider, provider))).limit(1);
+  return rows[0];
+}
+
+export async function upsertProviderSettings(values: typeof providerSettings.$inferInsert) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  const existing = await db.select({ id: providerSettings.id }).from(providerSettings).where(and(eq(providerSettings.userId, values.userId), eq(providerSettings.provider, values.provider ?? ""))).limit(1);
+  const updateSet = { clientIdEncrypted: values.clientIdEncrypted, clientSecretEncrypted: values.clientSecretEncrypted, redirectUri: values.redirectUri, scopes: values.scopes, enabled: values.enabled ?? 1, updatedAt: new Date() };
+  if (existing[0]) await db.update(providerSettings).set(updateSet).where(eq(providerSettings.id, existing[0].id));
+  else await db.insert(providerSettings).values(values);
+}
+
+export async function deleteProviderSettings(userId: number, provider: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  await db.delete(providerSettings).where(and(eq(providerSettings.userId, userId), eq(providerSettings.provider, provider)));
 }
 
 export async function upsertConnectedChannel(values: typeof connectedChannels.$inferInsert) {

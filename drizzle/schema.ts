@@ -61,6 +61,19 @@ export const connectedChannels = mysqlTable("connected_channels", {
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
+export const providerSettings = mysqlTable("provider_settings", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  provider: varchar("provider", { length: 32 }).notNull(),
+  clientIdEncrypted: text("clientIdEncrypted").notNull(),
+  clientSecretEncrypted: text("clientSecretEncrypted").notNull(),
+  redirectUri: varchar("redirectUri", { length: 512 }),
+  scopes: text("scopes"),
+  enabled: int("enabled").default(1).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
 export const contentAssets = mysqlTable("content_assets", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull(),
@@ -69,6 +82,7 @@ export const contentAssets = mysqlTable("content_assets", {
   storageKey: text("storageKey").notNull(),
   contentText: text("contentText"),
   structuralOutline: json("structuralOutline"),
+  metadata: json("metadata"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 

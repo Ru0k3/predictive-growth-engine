@@ -5,11 +5,16 @@ import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { buildDemoEvents, buildDemoInput, calculateOverlap, dashboardInputSchema, MODEL_VERSION } from "./analytics";
 import { invokeLLM } from "./_core/llm";
 import { z } from "zod";
-import { buildProviderAuthorizationUrl, decryptSecret, fetchAggregateSnapshot, Provider, createProviderState, getProviderConfig, revokeProviderToken } from "./providers";
+import { buildProviderAuthorizationUrl, decryptSecret, encryptSecret, fetchAggregateSnapshot, fetchTargetedMetrics, Provider, ProviderCredentials, createProviderState, getProviderConfig, revokeProviderToken } from "./providers";
 import { refreshConnectionIfNeeded } from "./providerOAuth";
 import * as db from "./db";
-import { buildEvidenceEvents, buildStructuralOutline, decodeTextUpload, retrieveEvidence } from "./content";
+import { buildEvidenceEvents, buildStructuralOutline, extractContentData, retrieveEvidence } from "./content";
 import { storagePut } from "./storage";
+
+async function userProviderCredentials(userId: number, provider: Provider): Promise<ProviderCredentials | undefined> {
+  const row = await db.getProviderSettings(userId, provider);
+  return row ? { clientId: decryptSecret(row.clientIdEncrypted), clientSecret: decryptSecret(row.clientSecretEncrypted), scopes: row.scopes?.split(",").filter(Boolean) } : undefined;
+}
 
 export const appRouter = router({
     // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
@@ -34,7 +39,7 @@ export const appRouter = router({
             try {
               const fullChannel = await db.getConnectedChannel(ctx.user!.id, channel.provider);
               if (!fullChannel) return null;
-              const refreshed = await refreshConnectionIfNeeded(fullChannel);
+              const refreshed = await refreshConnectionIfNeeded(fullChannel, await userProviderCredentials(ctx.user!.id, channel.provider as Provider));
               const snapshot = await fetchAggregateSnapshot(channel.provider as Provider, decryptSecret(refreshed.accessTokenEncrypted));
               await db.createAudienceSnapshot({ userId: ctx.user!.id, channel: snapshot.provider, reach: snapshot.reach, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
               return snapshot;
@@ -72,6 +77,12 @@ export const appRouter = router({
       };
     }),
     simulate: publicProcedure.input(dashboardInputSchema).mutation(({ input }) => calculateOverlap(input)),
+    targeted: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]), windowDays: z.number().int().min(7).max(90).default(28) })).query(async ({ ctx, input }) => {
+      const channel = await db.getConnectedChannel(ctx.user.id, input.provider);
+      if (!channel) throw new Error("Connect this provider first.");
+      const refreshed = await refreshConnectionIfNeeded(channel, await userProviderCredentials(ctx.user.id, input.provider));
+      return fetchTargetedMetrics(input.provider, decryptSecret(refreshed.accessTokenEncrypted), channel.externalAccountId, input.windowDays);
+    }),
     advisory: publicProcedure.input(z.object({
       focus: z.string().min(1).max(240),
       evidence: z.string().min(1).max(1200),
@@ -119,10 +130,10 @@ export const appRouter = router({
   }),
   connections: router({
     list: publicProcedure.query(async ({ ctx }) => ctx.user ? db.listConnectedChannels(ctx.user.id) : []),
-    start: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]), origin: z.string().url() })).mutation(({ ctx, input }) => {
+    start: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]), origin: z.string().url() })).mutation(async ({ ctx, input }) => {
       const state = createProviderState();
       const redirectUri = `${input.origin}/api/provider-oauth/callback`;
-      const url = buildProviderAuthorizationUrl(input.provider, redirectUri, state);
+      const url = buildProviderAuthorizationUrl(input.provider, redirectUri, state, await userProviderCredentials(ctx.user.id, input.provider));
       ctx.res.cookie("__Host-provider_oauth_state", state, { httpOnly: true, secure: true, sameSite: "none", path: "/", maxAge: 10 * 60 * 1000 });
       ctx.res.cookie("__Host-provider_oauth_provider", input.provider, { httpOnly: true, secure: true, sameSite: "none", path: "/", maxAge: 10 * 60 * 1000 });
       ctx.res.cookie("__Host-provider_oauth_origin", input.origin, { httpOnly: true, secure: true, sameSite: "none", path: "/", maxAge: 10 * 60 * 1000 });
@@ -132,7 +143,7 @@ export const appRouter = router({
       const channel = await db.getConnectedChannelById(ctx.user.id, input.id);
       if (channel) {
         try {
-          await revokeProviderToken(channel.provider as Provider, decryptSecret(channel.accessTokenEncrypted), channel.externalAccountId);
+          await revokeProviderToken(channel.provider as Provider, decryptSecret(channel.accessTokenEncrypted), channel.externalAccountId, await userProviderCredentials(ctx.user.id, channel.provider as Provider));
         } catch (error) {
           console.warn("[Provider OAuth] remote revoke failed", error);
         }
@@ -143,26 +154,36 @@ export const appRouter = router({
     sync: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]) })).mutation(async ({ ctx, input }) => {
       const channel = await db.getConnectedChannel(ctx.user.id, input.provider);
       if (!channel) throw new Error("Connect this provider first.");
-      const refreshed = await refreshConnectionIfNeeded(channel);
+      const refreshed = await refreshConnectionIfNeeded(channel, await userProviderCredentials(ctx.user.id, input.provider));
       const snapshot = await fetchAggregateSnapshot(input.provider, decryptSecret(refreshed.accessTokenEncrypted));
       await db.createAudienceSnapshot({ userId: ctx.user.id, channel: snapshot.provider, reach: snapshot.reach, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
       await db.updateConnectedChannel(channel.id, { accountName: snapshot.accountName, lastSyncedAt: new Date(), status: "connected" });
       return snapshot;
     }),
-    config: publicProcedure.query(() => ({
-      youtube: Boolean(getProviderConfig("youtube").clientId),
-      instagram: Boolean(getProviderConfig("instagram").clientId),
-      tiktok: Boolean(getProviderConfig("tiktok").clientId),
+    config: publicProcedure.query(async ({ ctx }) => ({
+      youtube: Boolean(getProviderConfig("youtube").clientId) || Boolean(ctx.user && await db.getProviderSettings(ctx.user.id, "youtube")),
+      instagram: Boolean(getProviderConfig("instagram").clientId) || Boolean(ctx.user && await db.getProviderSettings(ctx.user.id, "instagram")),
+      tiktok: Boolean(getProviderConfig("tiktok").clientId) || Boolean(ctx.user && await db.getProviderSettings(ctx.user.id, "tiktok")),
     })),
+  }),
+  providerSettings: router({
+    list: protectedProcedure.query(({ ctx }) => db.listProviderSettings(ctx.user.id)),
+    save: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]), clientId: z.string().min(1).max(512), clientSecret: z.string().min(1).max(2048), redirectUri: z.string().url().optional(), scopes: z.string().max(2000).optional() })).mutation(async ({ ctx, input }) => {
+      await db.upsertProviderSettings({ userId: ctx.user.id, provider: input.provider, clientIdEncrypted: encryptSecret(input.clientId), clientSecretEncrypted: encryptSecret(input.clientSecret), redirectUri: input.redirectUri ?? null, scopes: input.scopes ?? null, enabled: 1, createdAt: new Date(), updatedAt: new Date() });
+      return { success: true } as const;
+    }),
+    remove: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]) })).mutation(async ({ ctx, input }) => { await db.deleteProviderSettings(ctx.user.id, input.provider); return { success: true } as const; }),
   }),
   content: router({
     list: protectedProcedure.query(({ ctx }) => db.listContentAssets(ctx.user.id)),
     upload: protectedProcedure.input(z.object({ name: z.string().min(1).max(255), mimeType: z.string().min(1).max(128), base64: z.string().min(1).max(8_000_000) })).mutation(async ({ ctx, input }) => {
-      const text = decodeTextUpload(input.mimeType, input.base64);
+      const buffer = Buffer.from(input.base64, "base64");
+      const extracted = await extractContentData(input.name, input.mimeType, buffer);
+      const text = extracted.text;
       const outline = buildStructuralOutline(text);
       const events = buildEvidenceEvents(outline);
-      const stored = await storagePut(`${ctx.user.id}-content/${input.name}`, Buffer.from(input.base64, "base64"), input.mimeType);
-      const assetId = await db.createContentAsset({ userId: ctx.user.id, name: input.name, mimeType: input.mimeType, storageKey: stored.key, contentText: text, structuralOutline: outline, createdAt: new Date() });
+      const stored = await storagePut(`${ctx.user.id}-content/${input.name}`, buffer, input.mimeType);
+      const assetId = await db.createContentAsset({ userId: ctx.user.id, name: input.name, mimeType: input.mimeType, storageKey: stored.key, contentText: text, structuralOutline: outline, metadata: extracted.metadata, createdAt: new Date() });
       await db.createEvidenceEvents(events.map((event) => ({ ...event, userId: ctx.user!.id, assetId, createdAt: new Date() })));
       return { id: assetId, name: input.name, sections: outline.length, events: events.length, url: stored.url };
     }),
@@ -172,7 +193,7 @@ export const appRouter = router({
       const outline = (asset.structuralOutline ?? []) as ReturnType<typeof buildStructuralOutline>;
       const evidence = retrieveEvidence(outline, input.position ?? "0.5");
       const events = await db.listEvidenceEvents(ctx.user.id, input.assetId);
-      return { asset: { id: asset.id, name: asset.name, createdAt: asset.createdAt }, evidence, events };
+      return { asset: { id: asset.id, name: asset.name, createdAt: asset.createdAt, metadata: asset.metadata }, evidence, events };
     }),
   }),
 });

@@ -1,4 +1,6 @@
 import { compressTimeSeries } from "./analytics";
+import { PDFParse } from "pdf-parse";
+import { parseBuffer } from "music-metadata";
 
 export type StructuralSection = { index: number; heading: string; text: string; position: number; paragraphRange: [number, number] };
 
@@ -40,4 +42,25 @@ export function decodeTextUpload(mimeType: string, base64: string) {
   const buffer = Buffer.from(base64, "base64");
   if (mimeType.startsWith("text/") || mimeType.includes("json") || mimeType.includes("markdown")) return buffer.toString("utf8");
   return `[${mimeType} uploaded successfully. Add a transcript or extracted text to enable evidence retrieval.]`;
+}
+
+export async function extractContentData(name: string, mimeType: string, buffer: Buffer) {
+  const lowerName = name.toLowerCase();
+  if (mimeType === "application/pdf" || lowerName.endsWith(".pdf")) {
+    const parser = new PDFParse({ data: buffer });
+    const result = await parser.getText();
+    await parser.destroy();
+    return { text: result.text, metadata: { kind: "pdf", pages: result.total ?? null, sourceName: name } };
+  }
+  if (mimeType.startsWith("video/") || mimeType.startsWith("audio/") || /\.(mp4|mov|webm|m4a|mp3|wav)$/i.test(lowerName)) {
+    try {
+      const media = await parseBuffer(buffer, mimeType);
+      return { text: media.common.title ?? `[${mimeType} media uploaded. Add a transcript to enable evidence retrieval.]`, metadata: { kind: "video-metadata", sourceName: name, durationSeconds: media.format.duration ?? null, bitrate: media.format.bitrate ?? null, codec: media.format.codec ?? null, title: media.common.title ?? null, artist: media.common.artist ?? null } };
+    } catch {
+      return { text: `[${mimeType} media uploaded. Add a transcript to enable evidence retrieval.]`, metadata: { kind: "video-metadata", sourceName: name, parseStatus: "metadata-unavailable" } };
+    }
+  }
+  const text = buffer.toString("utf8").replace(/\r/g, "");
+  const timestampedSegments = Array.from(text.matchAll(/(?:^|\n)\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d{1,3})?)\s*[-–>]+\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d{1,3})?)\s*\n?([^\n]+)/g)).map((match) => ({ start: match[1], end: match[2], text: match[3]?.trim() ?? "" }));
+  return { text: text.replace(/^WEBVTT\s*/i, "").trim(), metadata: { kind: timestampedSegments.length ? "transcript" : "text", sourceName: name, timestampedSegments } };
 }

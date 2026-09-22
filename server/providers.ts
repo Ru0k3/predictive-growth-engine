@@ -11,6 +11,8 @@ type ProviderConfig = {
   scopes: string[];
 };
 
+export type ProviderCredentials = { clientId: string; clientSecret: string; scopes?: string[] };
+
 export type ProviderTokenResponse = {
   access_token: string;
   refresh_token?: string;
@@ -33,6 +35,9 @@ export type AggregateSnapshot = {
   observedAt: string;
   source: string;
 };
+
+export type TargetedVideoMetric = { id: string; title: string; publishedAt?: string; views: number; reach?: number; likes: number; comments: number; shares?: number; saves?: number; averageWatchSeconds?: number; averageRetentionPercent?: number; source: string };
+export type TargetedMetrics = { provider: Provider; accountName: string; windowDays: number; videos: TargetedVideoMetric[]; retentionAvailable: boolean; retentionNote: string; refreshedAt: string };
 
 const providerConfig: Record<Provider, () => ProviderConfig> = {
   youtube: () => ({
@@ -65,8 +70,8 @@ export function getProviderConfig(provider: Provider) {
   return providerConfig[provider]();
 }
 
-export function assertProviderConfigured(provider: Provider) {
-  const config = getProviderConfig(provider);
+export function assertProviderConfigured(provider: Provider, credentials?: ProviderCredentials) {
+  const config = { ...getProviderConfig(provider), ...(credentials ?? {}) };
   if (!config.clientId || !config.clientSecret) {
     throw new Error(`${provider} OAuth is not configured. Set the provider client ID and secret.`);
   }
@@ -77,8 +82,8 @@ export function createProviderState() {
   return randomBytes(32).toString("base64url");
 }
 
-export function buildProviderAuthorizationUrl(provider: Provider, redirectUri: string, state: string) {
-  const config = assertProviderConfigured(provider);
+export function buildProviderAuthorizationUrl(provider: Provider, redirectUri: string, state: string, credentials?: ProviderCredentials) {
+  const config = assertProviderConfigured(provider, credentials);
   const params = new URLSearchParams({
     client_id: config.clientId,
     redirect_uri: redirectUri,
@@ -96,8 +101,8 @@ export function buildProviderAuthorizationUrl(provider: Provider, redirectUri: s
   return `${config.authUrl}?${params.toString()}`;
 }
 
-export async function exchangeProviderCode(provider: Provider, code: string, redirectUri: string) {
-  const config = assertProviderConfigured(provider);
+export async function exchangeProviderCode(provider: Provider, code: string, redirectUri: string, credentials?: ProviderCredentials) {
+  const config = assertProviderConfigured(provider, credentials);
   const body = new URLSearchParams({
     client_id: config.clientId,
     client_secret: config.clientSecret,
@@ -118,8 +123,8 @@ export async function exchangeProviderCode(provider: Provider, code: string, red
   return (await response.json()) as ProviderTokenResponse;
 }
 
-export async function refreshProviderToken(provider: Provider, refreshToken: string) {
-  const config = assertProviderConfigured(provider);
+export async function refreshProviderToken(provider: Provider, refreshToken: string, credentials?: ProviderCredentials) {
+  const config = assertProviderConfigured(provider, credentials);
   const body = new URLSearchParams({
     client_id: config.clientId,
     client_secret: config.clientSecret,
@@ -139,8 +144,8 @@ export async function refreshProviderToken(provider: Provider, refreshToken: str
   return (await response.json()) as ProviderTokenResponse;
 }
 
-export async function revokeProviderToken(provider: Provider, accessToken: string, externalAccountId?: string) {
-  const config = getProviderConfig(provider);
+export async function revokeProviderToken(provider: Provider, accessToken: string, externalAccountId?: string, credentials?: ProviderCredentials) {
+  const config = { ...getProviderConfig(provider), ...(credentials ?? {}) };
   if (provider === "youtube") {
     const url = new URL("https://oauth2.googleapis.com/revoke");
     url.searchParams.set("token", accessToken);
@@ -183,6 +188,12 @@ export function decryptSecret(value: string) {
 
 async function getJson(url: URL, accessToken: string) {
   const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  if (!response.ok) throw new Error(`Provider API request failed (${response.status})`);
+  return response.json() as Promise<Record<string, any>>;
+}
+
+async function postJson(url: URL, accessToken: string, body: unknown) {
+  const response = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) throw new Error(`Provider API request failed (${response.status})`);
   return response.json() as Promise<Record<string, any>>;
 }
@@ -247,4 +258,25 @@ export async function fetchAggregateSnapshot(provider: Provider, accessToken: st
     observedAt: new Date().toISOString(),
     source: "TikTok User Info API + OAuth",
   };
+}
+
+
+export async function fetchTargetedMetrics(provider: Provider, accessToken: string, externalAccountId: string, windowDays = 28): Promise<TargetedMetrics> {
+  const config = getProviderConfig(provider);
+  if (provider === "youtube") {
+    const searchUrl = new URL(`${config.apiUrl}/search`); searchUrl.searchParams.set("part", "snippet"); searchUrl.searchParams.set("forMine", "true"); searchUrl.searchParams.set("type", "video"); searchUrl.searchParams.set("maxResults", "10");
+    const search = await getJson(searchUrl, accessToken); const ids = (search.items ?? []).map((item: any) => item.id?.videoId).filter(Boolean);
+    const videosUrl = new URL(`${config.apiUrl}/videos`); videosUrl.searchParams.set("part", "snippet,statistics"); videosUrl.searchParams.set("id", ids.join(","));
+    const videos = ids.length ? await getJson(videosUrl, accessToken) : { items: [] };
+    const reportUrl = new URL("https://youtubeanalytics.googleapis.com/v2/reports"); reportUrl.searchParams.set("ids", "channel==MINE"); reportUrl.searchParams.set("startDate", new Date(Date.now() - windowDays * 86400000).toISOString().slice(0, 10)); reportUrl.searchParams.set("endDate", new Date().toISOString().slice(0, 10)); reportUrl.searchParams.set("metrics", "views,averageViewDuration,averageViewPercentage"); reportUrl.searchParams.set("dimensions", "video");
+    const report = await getJson(reportUrl, accessToken).catch(() => ({ rows: [] })); const retention = new Map<string, any>((report.rows ?? []).map((row: any[]) => [String(row[0]), row]));
+    return { provider, accountName: externalAccountId || "YouTube channel", windowDays, videos: (videos.items ?? []).map((item: any) => { const row = retention.get(item.id); return { id: item.id, title: item.snippet?.title ?? "Untitled video", publishedAt: item.snippet?.publishedAt, views: Number(item.statistics?.viewCount ?? 0), likes: Number(item.statistics?.likeCount ?? 0), comments: Number(item.statistics?.commentCount ?? 0), averageWatchSeconds: row ? Number(row[2] ?? 0) : undefined, averageRetentionPercent: row ? Number(row[3] ?? 0) : undefined, source: "YouTube Data API + Analytics API" }; }), retentionAvailable: retention.size > 0, retentionNote: retention.size ? "Average view duration and percentage are available for this channel." : "YouTube Analytics returned no retention rows for this window.", refreshedAt: new Date().toISOString() };
+  }
+  if (provider === "instagram") {
+    const mediaUrl = new URL(`${config.apiUrl}/${externalAccountId}/media`); mediaUrl.searchParams.set("fields", "id,caption,timestamp,like_count,comments_count,media_type"); mediaUrl.searchParams.set("limit", "10");
+    const media = await getJson(mediaUrl, accessToken); const rows = await Promise.all((media.data ?? []).map(async (item: any) => { const insightUrl = new URL(`${config.apiUrl}/${item.id}/insights`); insightUrl.searchParams.set("metric", "reach,impressions,engagement,saved,shares"); const insights = await getJson(insightUrl, accessToken).catch(() => ({ data: [] })); return { item, values: Object.fromEntries((insights.data ?? []).map((metric: any) => [metric.name, Number(metric.values?.[0]?.value ?? 0)])) }; }));
+    return { provider, accountName: externalAccountId || "Instagram professional account", windowDays, videos: rows.map(({ item, values }) => ({ id: item.id, title: item.caption?.split("\n")[0] || `${item.media_type ?? "Media"} post`, publishedAt: item.timestamp, views: values.impressions ?? 0, reach: values.reach ?? 0, likes: Number(item.like_count ?? 0), comments: Number(item.comments_count ?? 0), shares: values.shares, saves: values.saved, source: "Instagram Graph API media + insights" })), retentionAvailable: false, retentionNote: "Instagram exposes media reach and engagement insights, but not viewer-retention curves through this API path.", refreshedAt: new Date().toISOString() };
+  }
+  const videoUrl = new URL(`${config.apiUrl}/video/list/`); videoUrl.searchParams.set("fields", "id,title,create_time,video_description,view_count,like_count,comment_count,share_count"); const data = await postJson(videoUrl, accessToken, { max_count: 10 }); const items = data.data?.videos ?? data.videos ?? [];
+  return { provider, accountName: externalAccountId || "TikTok creator", windowDays, videos: items.map((item: any) => ({ id: item.id, title: item.title ?? item.video_description ?? "TikTok video", publishedAt: item.create_time ? new Date(Number(item.create_time) * 1000).toISOString() : undefined, views: Number(item.view_count ?? 0), likes: Number(item.like_count ?? 0), comments: Number(item.comment_count ?? 0), shares: Number(item.share_count ?? 0), source: "TikTok Video List API" })), retentionAvailable: false, retentionNote: "TikTok’s standard creator API exposes video engagement counts; viewer-retention curves require an approved analytics product scope.", refreshedAt: new Date().toISOString() };
 }
