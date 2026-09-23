@@ -1,4 +1,4 @@
-import { desc, eq, and } from "drizzle-orm";
+import { desc, eq, and, gt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots, providerSettings } from "../drizzle/schema";
 import { ENV } from './_core/env';
@@ -110,6 +110,27 @@ export async function createAudienceSnapshot(values: typeof audienceSnapshots.$i
   await db.insert(audienceSnapshots).values(values);
 }
 
+export async function listAudienceSnapshots(userId: number, days = 90, channel?: string) {
+  const db = await getDb();
+  if (!db) return [];
+  const since = new Date(Date.now() - days * 86400000);
+  const filters = channel ? and(eq(audienceSnapshots.userId, userId), eq(audienceSnapshots.channel, channel), gt(audienceSnapshots.observedAt, since)) : and(eq(audienceSnapshots.userId, userId), gt(audienceSnapshots.observedAt, since));
+  return db.select().from(audienceSnapshots).where(filters).orderBy(audienceSnapshots.observedAt);
+}
+
+export async function updateUserSchedule(userId: number, values: { scheduleCronTaskUid?: string | null; scheduleCron?: string | null }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  await db.update(users).set({ ...values, updatedAt: new Date() }).where(eq(users.id, userId));
+}
+
+export async function getUserByScheduleTaskUid(taskUid: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(users).where(eq(users.scheduleCronTaskUid, taskUid)).limit(1);
+  return rows[0];
+}
+
 export async function getConnectedChannel(userId: number, provider: string) {
   const db = await getDb();
   if (!db) return undefined;
@@ -197,6 +218,12 @@ export async function getContentAsset(userId: number, id: number) {
   if (!db) return undefined;
   const rows = await db.select().from(contentAssets).where(and(eq(contentAssets.userId, userId), eq(contentAssets.id, id))).limit(1);
   return rows[0];
+}
+
+export async function updateContentAsset(userId: number, id: number, values: Partial<typeof contentAssets.$inferInsert>) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  await db.update(contentAssets).set(values).where(and(eq(contentAssets.userId, userId), eq(contentAssets.id, id)));
 }
 
 export async function listContentAssets(userId: number) {

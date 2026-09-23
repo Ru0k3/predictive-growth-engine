@@ -19,11 +19,12 @@ import {
   Sparkles,
   Target,
   Timer,
+  Download,
   UploadCloud,
   Users,
   X,
 } from "lucide-react";
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -100,8 +101,18 @@ export default function Home() {
   const evidence = trpc.content.evidence.useQuery({ assetId: selectedAssetId ?? 0 }, { enabled: Boolean(selectedAssetId && isAuthenticated) });
   const [targetedProvider, setTargetedProvider] = useState<"youtube" | "instagram" | "tiktok">("youtube");
   const targeted = trpc.analysis.targeted.useQuery({ provider: targetedProvider, windowDays: 28 }, { enabled: Boolean(isAuthenticated && connections.data?.some((connection) => connection.provider === targetedProvider)) });
+  const history = trpc.analysis.history.useQuery({ days: 90 }, { enabled: isAuthenticated });
+  const schedule = trpc.syncSchedule.status.useQuery(undefined, { enabled: isAuthenticated });
+  const saveSchedule = trpc.syncSchedule.save.useMutation({ onSuccess: () => schedule.refetch() });
+  const disableSchedule = trpc.syncSchedule.disable.useMutation({ onSuccess: () => schedule.refetch() });
+  const transcribe = trpc.content.transcribe.useMutation({ onSuccess: () => contentAssets.refetch() });
   const advisory = trpc.analysis.advisory.useMutation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const historyChart = useMemo(() => {
+    const grouped = new Map<string, { date: string; totalReach: number; totalFollowers: number; totalEngagement: number }>();
+    for (const row of history.data ?? []) { const date = new Date(row.observedAt).toLocaleDateString([], { month: "short", day: "numeric" }); const current = grouped.get(date) ?? { date, totalReach: 0, totalFollowers: 0, totalEngagement: 0 }; current.totalReach += row.reach ?? 0; current.totalFollowers = Math.max(current.totalFollowers, row.followers ?? 0); current.totalEngagement += row.engagement ?? 0; grouped.set(date, current); }
+    return Array.from(grouped.values());
+  }, [history.data]);
 
   const fallback = useMemo(
     () => ({
@@ -160,6 +171,8 @@ export default function Home() {
     const result = await uploadContent.mutateAsync({ name: file.name, mimeType: file.type || "text/plain", base64 });
     setSelectedAssetId(result.id);
   };
+
+  const downloadReport = (format: "csv" | "pdf") => window.open(`/api/reports/${format}?days=90`, "_blank");
 
   return (
     <div className="min-h-screen bg-[#f5f7f8] text-[#19232f]">
@@ -345,6 +358,11 @@ export default function Home() {
           </div>
 
           <Card className="mt-7 border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
+            <CardHeader className="flex-row items-start justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8895a0]"><Activity size={13} className="text-[#4a9b71]" /> Historical performance</div><CardTitle className="text-lg tracking-[-0.02em] text-[#22303d]">Reach and improvement over time</CardTitle><p className="mt-2 text-xs text-[#71808d]">Combined snapshot history across connected platforms.</p></div><div className="flex flex-wrap gap-2"><button onClick={() => downloadReport("csv")} className="flex items-center gap-1.5 rounded-lg border border-[#dce7e0] px-3 py-2 text-[10px] font-semibold text-[#4a7d61]"><Download size={13} /> CSV</button><button onClick={() => downloadReport("pdf")} className="flex items-center gap-1.5 rounded-lg bg-[#1b5a3a] px-3 py-2 text-[10px] font-semibold text-white"><Download size={13} /> PDF</button></div></CardHeader>
+            <CardContent><div className="h-[230px] w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={historyChart} margin={{ top: 8, right: 10, left: -20, bottom: 0 }}><CartesianGrid vertical={false} stroke="#eef1f2" /><XAxis dataKey="date" tickLine={false} axisLine={false} tick={{ fill: "#9aa6af", fontSize: 10 }} /><YAxis tickLine={false} axisLine={false} tick={{ fill: "#9aa6af", fontSize: 10 }} tickFormatter={(value) => formatReach(Number(value))} /><Tooltip contentStyle={{ border: "0", borderRadius: 12, boxShadow: "0 10px 30px rgba(0,0,0,.1)", fontSize: 12 }} /><Line type="monotone" dataKey="totalReach" name="Total reach" stroke="#4a9b71" strokeWidth={3} dot={false} /><Line type="monotone" dataKey="totalFollowers" name="Followers" stroke="#86a9d3" strokeWidth={2} dot={false} /><Line type="monotone" dataKey="totalEngagement" name="Engagement" stroke="#e5ad67" strokeWidth={2} dot={false} /></LineChart></ResponsiveContainer></div><div className="mt-4 flex flex-wrap items-center gap-3 text-[10px] text-[#71808d]"><span className="rounded-lg bg-[#f5faf7] px-3 py-2">{history.data?.length ?? 0} snapshots indexed</span><span className="rounded-lg bg-[#f5faf7] px-3 py-2">{schedule.data?.enabled ? "Auto-sync on" : "Auto-sync off"}</span>{isAuthenticated && <select aria-label="Metric sync frequency" value={schedule.data?.cron ?? ""} onChange={(event) => event.target.value ? saveSchedule.mutate({ cron: event.target.value as "0 0 * * * *" | "0 0 9 * * *" | "0 0 9 * * 1" }) : disableSchedule.mutate()} className="rounded-lg border border-[#dce7e0] bg-white px-3 py-2 text-[10px] text-[#4a7d61]"><option value="">Set auto-sync…</option><option value="0 0 * * * *">Hourly</option><option value="0 0 9 * * *">Daily at 09:00 UTC</option><option value="0 0 9 * * 1">Weekly on Monday</option></select>}</div></CardContent>
+          </Card>
+
+          <Card className="mt-7 border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
             <CardHeader className="flex-row items-start justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8895a0]"><Activity size={13} className="text-[#4a9b71]" /> Targeted video signals</div><CardTitle className="text-lg tracking-[-0.02em] text-[#22303d]">Retention and release-level detail</CardTitle><p className="mt-2 text-xs text-[#71808d]">Provider-native video metrics with explicit retention availability.</p></div><div className="flex gap-2">{(["youtube", "instagram", "tiktok"] as const).map((provider) => <button key={provider} onClick={() => setTargetedProvider(provider)} className={`rounded-lg px-3 py-2 text-[10px] font-semibold capitalize ${targetedProvider === provider ? "bg-[#dcefe3] text-[#27744b]" : "bg-[#f5f8f6] text-[#87968e]"}`}>{provider}</button>)}</div></CardHeader>
             <CardContent>{targeted.data ? <><div className="mb-4 flex items-center gap-2 rounded-xl bg-[#f7faf8] p-3 text-xs text-[#5d7567]"><Timer size={14} className="text-[#4a9b71]" />{targeted.data.retentionNote}<span className="ml-auto text-[10px] text-[#8a9a92]">{targeted.data.windowDays}d</span></div><div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left"><thead><tr className="border-b border-[#e8eeea] text-[10px] uppercase tracking-[0.14em] text-[#8a9991]"><th className="pb-3">Video</th><th className="pb-3">Views / reach</th><th className="pb-3">Engagement</th><th className="pb-3">Retention</th></tr></thead><tbody>{targeted.data.videos.slice(0, 6).map((video) => <tr key={video.id} className="border-b border-[#f0f3f1] last:border-0"><td className="max-w-[280px] truncate py-3 pr-4 text-xs font-medium text-[#344b3e]">{video.title}</td><td className="py-3 pr-4 text-xs text-[#60746a]">{formatReach(video.views)}{video.reach ? ` / ${formatReach(video.reach)}` : ""}</td><td className="py-3 pr-4 text-xs text-[#60746a]">{formatReach(video.likes + video.comments + (video.shares ?? 0))}</td><td className="py-3 text-xs font-medium text-[#438360]">{video.averageRetentionPercent ? `${video.averageRetentionPercent.toFixed(1)}%` : "Not exposed"}</td></tr>)}</tbody></table></div></> : <div className="rounded-xl border border-dashed border-[#cbded2] bg-[#f8fbf9] p-6 text-center text-xs text-[#8b9b92]">Connect the selected provider to load targeted metrics.</div>}</CardContent>
           </Card>
@@ -476,7 +494,7 @@ export default function Home() {
                 <div className="rounded-2xl border border-dashed border-[#cbded2] bg-[#f8fbf9] p-4">
                   <div className="mb-3 flex items-center justify-between"><span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#789087]">Indexed assets</span><span className="rounded-full bg-[#e5f4e9] px-2 py-1 text-[10px] font-semibold text-[#438360]">{contentAssets.data?.length ?? 0}</span></div>
                   <div className="space-y-2">
-                    {(contentAssets.data ?? []).map((asset) => <button key={asset.id} onClick={() => setSelectedAssetId(asset.id)} className={`flex w-full items-center justify-between rounded-xl px-3 py-3 text-left transition ${selectedAssetId === asset.id ? "bg-[#dcefe3]" : "bg-white hover:bg-[#eef7f1]"}`}><span className="min-w-0"><span className="block truncate text-xs font-medium text-[#344b3e]">{asset.name}</span><span className="mt-1 block text-[10px] text-[#82968b]">{asset.mimeType}</span></span><ChevronRight size={14} className="shrink-0 text-[#91a99b]" /></button>)}
+                    {(contentAssets.data ?? []).map((asset) => <div key={asset.id} className={`flex items-center gap-2 rounded-xl px-3 py-3 transition ${selectedAssetId === asset.id ? "bg-[#dcefe3]" : "bg-white hover:bg-[#eef7f1]"}`}><button onClick={() => setSelectedAssetId(asset.id)} className="min-w-0 flex-1 text-left"><span className="block truncate text-xs font-medium text-[#344b3e]">{asset.name}</span><span className="mt-1 block text-[10px] text-[#82968b]">{asset.mimeType}</span></button>{asset.mimeType.startsWith("video/") || asset.mimeType.startsWith("audio/") ? <button onClick={() => transcribe.mutate({ assetId: asset.id })} disabled={transcribe.isPending} className="rounded-lg border border-[#cfe3d5] px-2 py-1 text-[10px] font-semibold text-[#4a7d61]">{transcribe.isPending ? "…" : "Transcribe"}</button> : null}<ChevronRight size={14} className="shrink-0 text-[#91a99b]" /></div>)}
                     {(contentAssets.data ?? []).length === 0 && <div className="py-7 text-center text-xs leading-relaxed text-[#8b9b92]">No indexed content yet.<br />Upload a text source to begin.</div>}
                   </div>
                 </div>

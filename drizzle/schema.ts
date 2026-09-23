@@ -20,6 +20,8 @@ export const users = mysqlTable("users", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
+  scheduleCronTaskUid: varchar("scheduleCronTaskUid", { length: 65 }),
+  scheduleCron: varchar("scheduleCron", { length: 64 }),
 });
 
 export type User = typeof users.$inferSelect;
@@ -33,6 +35,9 @@ export const audienceSnapshots = mysqlTable("audience_snapshots", {
   demographicVector: json("demographicVector").notNull(),
   observedAt: timestamp("observedAt").defaultNow().notNull(),
   source: varchar("source", { length: 128 }).notNull(),
+  impressions: bigint("impressions", { mode: "number" }).default(0),
+  followers: bigint("followers", { mode: "number" }).default(0),
+  engagement: bigint("engagement", { mode: "number" }).default(0),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 

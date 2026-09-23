@@ -43,7 +43,7 @@ export function registerProviderOAuthRoutes(app: Express) {
       const token = await exchangeProviderCode(provider, code, redirectUri, credentials);
       const snapshot = await fetchAggregateSnapshot(provider, token.access_token);
       const now = Date.now();
-      await db.createAudienceSnapshot({ userId: context.user.id, channel: snapshot.provider, reach: snapshot.reach, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
+      await db.createAudienceSnapshot({ userId: context.user.id, channel: snapshot.provider, reach: snapshot.reach, impressions: snapshot.impressions, followers: snapshot.followers, engagement: snapshot.engagement, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
       await db.upsertConnectedChannel({
         userId: context.user.id,
         provider,

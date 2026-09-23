@@ -10,10 +10,16 @@ import { refreshConnectionIfNeeded } from "./providerOAuth";
 import * as db from "./db";
 import { buildEvidenceEvents, buildStructuralOutline, extractContentData, retrieveEvidence } from "./content";
 import { storagePut } from "./storage";
+import { parse as parseCookieHeader } from "cookie";
+import { createHeartbeatJob, deleteHeartbeatJob, updateHeartbeatJob } from "./_core/heartbeat";
 
 async function userProviderCredentials(userId: number, provider: Provider): Promise<ProviderCredentials | undefined> {
   const row = await db.getProviderSettings(userId, provider);
   return row ? { clientId: decryptSecret(row.clientIdEncrypted), clientSecret: decryptSecret(row.clientSecretEncrypted), scopes: row.scopes?.split(",").filter(Boolean) } : undefined;
+}
+
+function sessionToken(ctx: any) {
+  return parseCookieHeader(ctx.req.headers.cookie ?? "")[COOKIE_NAME] ?? "";
 }
 
 export const appRouter = router({
@@ -41,7 +47,7 @@ export const appRouter = router({
               if (!fullChannel) return null;
               const refreshed = await refreshConnectionIfNeeded(fullChannel, await userProviderCredentials(ctx.user!.id, channel.provider as Provider));
               const snapshot = await fetchAggregateSnapshot(channel.provider as Provider, decryptSecret(refreshed.accessTokenEncrypted));
-              await db.createAudienceSnapshot({ userId: ctx.user!.id, channel: snapshot.provider, reach: snapshot.reach, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
+              await db.createAudienceSnapshot({ userId: ctx.user!.id, channel: snapshot.provider, reach: snapshot.reach, impressions: snapshot.impressions, followers: snapshot.followers, engagement: snapshot.engagement, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
               return snapshot;
             } catch (error) {
               console.warn(`[${channel.provider}] live sync failed`, error);
@@ -77,6 +83,7 @@ export const appRouter = router({
       };
     }),
     simulate: publicProcedure.input(dashboardInputSchema).mutation(({ input }) => calculateOverlap(input)),
+    history: protectedProcedure.input(z.object({ days: z.number().int().min(7).max(365).default(90), channel: z.string().optional() })).query(({ ctx, input }) => db.listAudienceSnapshots(ctx.user.id, input.days, input.channel)),
     targeted: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]), windowDays: z.number().int().min(7).max(90).default(28) })).query(async ({ ctx, input }) => {
       const channel = await db.getConnectedChannel(ctx.user.id, input.provider);
       if (!channel) throw new Error("Connect this provider first.");
@@ -156,7 +163,7 @@ export const appRouter = router({
       if (!channel) throw new Error("Connect this provider first.");
       const refreshed = await refreshConnectionIfNeeded(channel, await userProviderCredentials(ctx.user.id, input.provider));
       const snapshot = await fetchAggregateSnapshot(input.provider, decryptSecret(refreshed.accessTokenEncrypted));
-      await db.createAudienceSnapshot({ userId: ctx.user.id, channel: snapshot.provider, reach: snapshot.reach, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
+      await db.createAudienceSnapshot({ userId: ctx.user.id, channel: snapshot.provider, reach: snapshot.reach, impressions: snapshot.impressions, followers: snapshot.followers, engagement: snapshot.engagement, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
       await db.updateConnectedChannel(channel.id, { accountName: snapshot.accountName, lastSyncedAt: new Date(), status: "connected" });
       return snapshot;
     }),
@@ -174,6 +181,24 @@ export const appRouter = router({
     }),
     remove: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]) })).mutation(async ({ ctx, input }) => { await db.deleteProviderSettings(ctx.user.id, input.provider); return { success: true } as const; }),
   }),
+  syncSchedule: router({
+    status: protectedProcedure.query(({ ctx }) => ({ cron: ctx.user.scheduleCron ?? null, taskUid: ctx.user.scheduleCronTaskUid ?? null, enabled: Boolean(ctx.user.scheduleCronTaskUid) })),
+    save: protectedProcedure.input(z.object({ cron: z.enum(["0 0 * * * *", "0 0 9 * * *", "0 0 9 * * 1"]) })).mutation(async ({ ctx, input }) => {
+      const token = sessionToken(ctx);
+      if (ctx.user.scheduleCronTaskUid) await updateHeartbeatJob(ctx.user.scheduleCronTaskUid, { cron: input.cron, enable: true, description: "Sync connected social metrics and update historical dashboard trends" }, token);
+      else {
+        const job = await createHeartbeatJob({ name: `sync-metrics-${ctx.user.id}`, cron: input.cron, path: "/api/scheduled/sync-metrics", description: "Sync connected social metrics and update historical dashboard trends" }, token);
+        await db.updateUserSchedule(ctx.user.id, { scheduleCronTaskUid: job.taskUid, scheduleCron: input.cron });
+      }
+      if (ctx.user.scheduleCronTaskUid) await db.updateUserSchedule(ctx.user.id, { scheduleCron: input.cron });
+      return { success: true, cron: input.cron } as const;
+    }),
+    disable: protectedProcedure.mutation(async ({ ctx }) => {
+      if (ctx.user.scheduleCronTaskUid) await deleteHeartbeatJob(ctx.user.scheduleCronTaskUid, sessionToken(ctx));
+      await db.updateUserSchedule(ctx.user.id, { scheduleCronTaskUid: null, scheduleCron: null });
+      return { success: true } as const;
+    }),
+  }),
   content: router({
     list: protectedProcedure.query(({ ctx }) => db.listContentAssets(ctx.user.id)),
     upload: protectedProcedure.input(z.object({ name: z.string().min(1).max(255), mimeType: z.string().min(1).max(128), base64: z.string().min(1).max(8_000_000) })).mutation(async ({ ctx, input }) => {
@@ -183,9 +208,22 @@ export const appRouter = router({
       const outline = buildStructuralOutline(text);
       const events = buildEvidenceEvents(outline);
       const stored = await storagePut(`${ctx.user.id}-content/${input.name}`, buffer, input.mimeType);
-      const assetId = await db.createContentAsset({ userId: ctx.user.id, name: input.name, mimeType: input.mimeType, storageKey: stored.key, contentText: text, structuralOutline: outline, metadata: extracted.metadata, createdAt: new Date() });
+      const assetId = await db.createContentAsset({ userId: ctx.user.id, name: input.name, mimeType: input.mimeType, storageKey: stored.key, contentText: text, structuralOutline: outline, metadata: { ...extracted.metadata, storageUrl: stored.url }, createdAt: new Date() });
       await db.createEvidenceEvents(events.map((event) => ({ ...event, userId: ctx.user!.id, assetId, createdAt: new Date() })));
       return { id: assetId, name: input.name, sections: outline.length, events: events.length, url: stored.url };
+    }),
+    transcribe: protectedProcedure.input(z.object({ assetId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      const asset = await db.getContentAsset(ctx.user.id, input.assetId);
+      if (!asset) throw new Error("Content asset not found.");
+      const metadata = (asset.metadata ?? {}) as { storageUrl?: string; kind?: string };
+      if (!metadata.storageUrl) throw new Error("This asset has no accessible media URL.");
+      const response = await invokeLLM({ model: "gpt-5-mini", messages: [{ role: "system", content: "Transcribe the supplied video or audio faithfully. Return only the transcript text with speaker changes and meaningful timestamps when available. Do not summarize or invent missing words." }, { role: "user", content: [{ type: "text", text: `Transcribe this uploaded ${asset.mimeType} file.` }, { type: "file_url", file_url: { url: metadata.storageUrl, mime_type: asset.mimeType as "video/mp4" } }] }] });
+      const content = response.choices?.[0]?.message?.content;
+      const transcript = typeof content === "string" ? content : content?.map((part) => "text" in part ? part.text : "").join("");
+      if (!transcript) throw new Error("The transcription model returned no text.");
+      const outline = buildStructuralOutline(transcript);
+      await db.updateContentAsset(ctx.user.id, input.assetId, { contentText: transcript, structuralOutline: outline, metadata: { ...metadata, transcriptStatus: "generated", transcriptGeneratedAt: new Date().toISOString() } });
+      return { transcript, sections: outline.length };
     }),
     evidence: protectedProcedure.input(z.object({ assetId: z.number().int().positive(), position: z.string().optional() })).query(async ({ ctx, input }) => {
       const asset = await db.getContentAsset(ctx.user.id, input.assetId);
