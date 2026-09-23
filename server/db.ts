@@ -1,4 +1,4 @@
-import { desc, eq, and, gt } from "drizzle-orm";
+import { desc, eq, and, gt, lt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots, providerSettings } from "../drizzle/schema";
 import { ENV } from './_core/env';
@@ -110,11 +110,12 @@ export async function createAudienceSnapshot(values: typeof audienceSnapshots.$i
   await db.insert(audienceSnapshots).values(values);
 }
 
-export async function listAudienceSnapshots(userId: number, days = 90, channel?: string) {
+export async function listAudienceSnapshots(userId: number, days = 90, channel?: string, from?: Date, to?: Date) {
   const db = await getDb();
   if (!db) return [];
-  const since = new Date(Date.now() - days * 86400000);
-  const filters = channel ? and(eq(audienceSnapshots.userId, userId), eq(audienceSnapshots.channel, channel), gt(audienceSnapshots.observedAt, since)) : and(eq(audienceSnapshots.userId, userId), gt(audienceSnapshots.observedAt, since));
+  const since = from ?? new Date(Date.now() - days * 86400000);
+  const until = to ?? new Date();
+  const filters = channel ? and(eq(audienceSnapshots.userId, userId), eq(audienceSnapshots.channel, channel), gt(audienceSnapshots.observedAt, since), lt(audienceSnapshots.observedAt, until)) : and(eq(audienceSnapshots.userId, userId), gt(audienceSnapshots.observedAt, since), lt(audienceSnapshots.observedAt, until));
   return db.select().from(audienceSnapshots).where(filters).orderBy(audienceSnapshots.observedAt);
 }
 

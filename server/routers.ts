@@ -12,6 +12,7 @@ import { buildEvidenceEvents, buildStructuralOutline, extractContentData, retrie
 import { storagePut } from "./storage";
 import { parse as parseCookieHeader } from "cookie";
 import { createHeartbeatJob, deleteHeartbeatJob, updateHeartbeatJob } from "./_core/heartbeat";
+import { normalizeTranscriptAnalysis } from "./transcriptAnalysis";
 
 async function userProviderCredentials(userId: number, provider: Provider): Promise<ProviderCredentials | undefined> {
   const row = await db.getProviderSettings(userId, provider);
@@ -83,7 +84,7 @@ export const appRouter = router({
       };
     }),
     simulate: publicProcedure.input(dashboardInputSchema).mutation(({ input }) => calculateOverlap(input)),
-    history: protectedProcedure.input(z.object({ days: z.number().int().min(7).max(365).default(90), channel: z.string().optional() })).query(({ ctx, input }) => db.listAudienceSnapshots(ctx.user.id, input.days, input.channel)),
+    history: protectedProcedure.input(z.object({ days: z.number().int().min(7).max(365).default(90), channel: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional() })).query(({ ctx, input }) => db.listAudienceSnapshots(ctx.user.id, input.days, input.channel, input.from ? new Date(input.from) : undefined, input.to ? new Date(input.to) : undefined)),
     targeted: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]), windowDays: z.number().int().min(7).max(90).default(28) })).query(async ({ ctx, input }) => {
       const channel = await db.getConnectedChannel(ctx.user.id, input.provider);
       if (!channel) throw new Error("Connect this provider first.");
@@ -217,13 +218,39 @@ export const appRouter = router({
       if (!asset) throw new Error("Content asset not found.");
       const metadata = (asset.metadata ?? {}) as { storageUrl?: string; kind?: string };
       if (!metadata.storageUrl) throw new Error("This asset has no accessible media URL.");
-      const response = await invokeLLM({ model: "gpt-5-mini", messages: [{ role: "system", content: "Transcribe the supplied video or audio faithfully. Return only the transcript text with speaker changes and meaningful timestamps when available. Do not summarize or invent missing words." }, { role: "user", content: [{ type: "text", text: `Transcribe this uploaded ${asset.mimeType} file.` }, { type: "file_url", file_url: { url: metadata.storageUrl, mime_type: asset.mimeType as "video/mp4" } }] }] });
+      const response = await invokeLLM({
+        model: "gpt-5-mini",
+        messages: [
+          { role: "system", content: "Transcribe the supplied video or audio faithfully, then extract key topics and sentiment from the transcript. Return structured JSON only. Do not invent missing words or evidence." },
+          { role: "user", content: [{ type: "text", text: `Analyze this uploaded ${asset.mimeType} file. Return a faithful transcript plus 3-8 concise topics, an overall sentiment label, a sentiment score from -1 to 1, and a one-sentence summary.` }, { type: "file_url", file_url: { url: metadata.storageUrl, mime_type: asset.mimeType as "video/mp4" } }] },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "transcript_analysis",
+            strict: true,
+            schema: {
+              type: "object",
+              properties: {
+                transcript: { type: "string" },
+                topics: { type: "array", items: { type: "string" } },
+                sentiment: { type: "string", enum: ["positive", "neutral", "negative", "mixed"] },
+                sentimentScore: { type: "number" },
+                summary: { type: "string" },
+              },
+              required: ["transcript", "topics", "sentiment", "sentimentScore", "summary"],
+              additionalProperties: false,
+            },
+          },
+        },
+      });
       const content = response.choices?.[0]?.message?.content;
-      const transcript = typeof content === "string" ? content : content?.map((part) => "text" in part ? part.text : "").join("");
-      if (!transcript) throw new Error("The transcription model returned no text.");
-      const outline = buildStructuralOutline(transcript);
-      await db.updateContentAsset(ctx.user.id, input.assetId, { contentText: transcript, structuralOutline: outline, metadata: { ...metadata, transcriptStatus: "generated", transcriptGeneratedAt: new Date().toISOString() } });
-      return { transcript, sections: outline.length };
+      const raw = typeof content === "string" ? content : content?.map((part) => "text" in part ? part.text : "").join("");
+      if (!raw) throw new Error("The transcription model returned no text.");
+      const analysis = normalizeTranscriptAnalysis(raw);
+      const outline = buildStructuralOutline(analysis.transcript);
+      await db.updateContentAsset(ctx.user.id, input.assetId, { contentText: analysis.transcript, structuralOutline: outline, metadata: { ...metadata, transcriptStatus: "generated", transcriptGeneratedAt: new Date().toISOString(), topics: analysis.topics, sentiment: analysis.sentiment, sentimentScore: analysis.sentimentScore, summary: analysis.summary } });
+      return { ...analysis, sections: outline.length };
     }),
     evidence: protectedProcedure.input(z.object({ assetId: z.number().int().positive(), position: z.string().optional() })).query(async ({ ctx, input }) => {
       const asset = await db.getContentAsset(ctx.user.id, input.assetId);
