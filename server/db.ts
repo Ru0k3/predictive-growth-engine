@@ -120,6 +120,16 @@ export async function listAudienceSnapshots(userId: number, days = 90, channel?:
   return db.select().from(audienceSnapshots).where(filters).orderBy(audienceSnapshots.observedAt);
 }
 
+export async function listLatestAudienceSnapshots(userId: number) {
+  const rows = await listAudienceSnapshots(userId, 365);
+  const latest = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    const previous = latest.get(row.channel);
+    if (!previous || row.observedAt.getTime() > previous.observedAt.getTime()) latest.set(row.channel, row);
+  }
+  return Array.from(latest.values());
+}
+
 export async function updateUserSchedule(userId: number, values: { scheduleCronTaskUid?: string | null; scheduleCron?: string | null }) {
   const db = await getDb();
   if (!db) throw new Error("Database is not available");

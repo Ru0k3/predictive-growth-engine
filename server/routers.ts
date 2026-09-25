@@ -13,6 +13,8 @@ import { storagePut } from "./storage";
 import { parse as parseCookieHeader } from "cookie";
 import { createHeartbeatJob, deleteHeartbeatJob, updateHeartbeatJob } from "./_core/heartbeat";
 import { normalizeTranscriptAnalysis } from "./transcriptAnalysis";
+import { syncConnectedChannel } from "./sync";
+import { ENV } from "./_core/env";
 
 async function userProviderCredentials(userId: number, provider: Provider): Promise<ProviderCredentials | undefined> {
   const row = await db.getProviderSettings(userId, provider);
@@ -25,6 +27,12 @@ function providerErrorMessage(error: unknown) {
 
 function sessionToken(ctx: any) {
   return parseCookieHeader(ctx.req.headers.cookie ?? "")[COOKIE_NAME] ?? "";
+}
+function isAllowedAppOrigin(origin: string, req: any) {
+  const requestProtocol = String(req.headers["x-forwarded-proto"] ?? req.protocol ?? "https").split(",")[0].trim();
+  const requestHost = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0].trim();
+  const requestOrigin = requestHost ? `${requestProtocol}://${requestHost}` : "";
+  return (requestOrigin && origin === requestOrigin) || ENV.allowedAppOrigins.includes(origin);
 }
 
 export const appRouter = router({
@@ -46,37 +54,36 @@ export const appRouter = router({
       if (ctx.user) {
         const channels = await db.listConnectedChannels(ctx.user.id);
         if (channels.length > 0) {
-          const snapshots = await Promise.all(channels.map(async (channel) => {
-            try {
-              const fullChannel = await db.getConnectedChannel(ctx.user!.id, channel.provider);
-              if (!fullChannel) return null;
-              const refreshed = await refreshConnectionIfNeeded(fullChannel, await userProviderCredentials(ctx.user!.id, channel.provider as Provider));
-              const snapshot = await fetchAggregateSnapshot(channel.provider as Provider, decryptSecret(refreshed.accessTokenEncrypted));
-              await db.createAudienceSnapshot({ userId: ctx.user!.id, channel: snapshot.provider, reach: snapshot.reach, impressions: snapshot.impressions, followers: snapshot.followers, engagement: snapshot.engagement, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
-              return snapshot;
-            } catch (error) {
-              console.warn(`[${channel.provider}] live sync failed`, error);
-              await db.updateConnectedChannel(channel.id, { status: "error", lastError: providerErrorMessage(error) }).catch(() => undefined);
-              return null;
-            }
-          }));
-          const live = snapshots.filter(Boolean) as NonNullable<typeof snapshots[number]>[];
+          const latest = await db.listLatestAudienceSnapshots(ctx.user.id);
+          const latestByProvider = new Map(latest.map((snapshot) => [snapshot.channel, snapshot]));
+          const live = channels.map((channel) => {
+            const snapshot = latestByProvider.get(channel.provider);
+            return snapshot ? { channel, snapshot } : null;
+          }).filter(Boolean) as Array<{ channel: (typeof channels)[number]; snapshot: (typeof latest)[number] }>;
           if (live.length > 0) {
             const input = {
-              channels: live.map((snapshot) => ({ name: snapshot.accountName, reach: snapshot.reach, demographics: snapshot.demographicVector })),
+              channels: live.map(({ channel, snapshot }) => ({ name: channel.accountName, reach: snapshot.reach, demographics: (snapshot.demographicVector ?? []) as number[] })),
               coefficient: 0.76,
               variance: 0.09,
               simulations: 1000,
-              seed: Date.now() % 100000,
+              seed: 42,
             };
+            const observedAt = live.map(({ snapshot }) => snapshot.observedAt.getTime()).sort((a, b) => b - a)[0];
             return {
               result: calculateOverlap(input),
-              events: buildDemoEvents(),
-              channels: live.map((snapshot) => ({ name: snapshot.accountName, reach: snapshot.reach, provider: snapshot.provider, impressions: snapshot.impressions, followers: snapshot.followers, engagement: snapshot.engagement })),
-              refreshedAt: new Date().toISOString(),
-              freshness: `Live native API data · ${live.length} connected channel${live.length === 1 ? "" : "s"}`,
+              events: [],
+              channels: live.map(({ channel, snapshot }) => ({ name: channel.accountName, reach: snapshot.reach, provider: snapshot.channel, impressions: snapshot.impressions ?? 0, followers: snapshot.followers ?? 0, engagement: snapshot.engagement ?? 0 })),
+              refreshedAt: observedAt ? new Date(observedAt).toISOString() : "",
+              freshness: `Persisted provider snapshots · ${live.length} channel${live.length === 1 ? "" : "s"}`,
             };
           }
+          return {
+            result: { estimatedUniqueReach: 0, interval: { low: 0, high: 0, confidence: 0.95 }, pairwise: [], assumptions: [], modelVersion: MODEL_VERSION },
+            events: [],
+            channels: channels.map((channel) => ({ name: channel.accountName, reach: 0, provider: channel.provider })),
+            refreshedAt: "",
+            freshness: "Connected channels · awaiting background sync",
+          };
         }
       }
       const input = buildDemoInput();
@@ -144,6 +151,7 @@ export const appRouter = router({
   connections: router({
     list: publicProcedure.query(async ({ ctx }) => ctx.user ? db.listConnectedChannels(ctx.user.id) : []),
     start: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]), origin: z.string().url() })).mutation(async ({ ctx, input }) => {
+      if (!isAllowedAppOrigin(input.origin, ctx.req)) throw new Error("OAuth origin is not allowed.");
       const state = createProviderState();
       const redirectUri = `${input.origin}/api/provider-oauth/callback`;
       const url = buildProviderAuthorizationUrl(input.provider, redirectUri, state, await userProviderCredentials(ctx.user.id, input.provider));
@@ -167,16 +175,9 @@ export const appRouter = router({
     sync: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]) })).mutation(async ({ ctx, input }) => {
       const channel = await db.getConnectedChannel(ctx.user.id, input.provider);
       if (!channel) throw new Error("Connect this provider first.");
-      try {
-        const refreshed = await refreshConnectionIfNeeded(channel, await userProviderCredentials(ctx.user.id, input.provider));
-        const snapshot = await fetchAggregateSnapshot(input.provider, decryptSecret(refreshed.accessTokenEncrypted));
-        await db.createAudienceSnapshot({ userId: ctx.user.id, channel: snapshot.provider, reach: snapshot.reach, impressions: snapshot.impressions, followers: snapshot.followers, engagement: snapshot.engagement, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
-        await db.updateConnectedChannel(channel.id, { accountName: snapshot.accountName, lastSyncedAt: new Date(), status: "connected", lastError: null });
-        return snapshot;
-      } catch (error) {
-        await db.updateConnectedChannel(channel.id, { status: "error", lastError: providerErrorMessage(error) }).catch(() => undefined);
-        throw error;
-      }
+      const result = await syncConnectedChannel(ctx.user.id, input.provider, await userProviderCredentials(ctx.user.id, input.provider), { force: true });
+      if (!result.ok) throw new Error(result.error ?? "Provider sync failed.");
+      return { provider: input.provider, syncedAt: new Date().toISOString() };
     }),
     config: publicProcedure.query(async ({ ctx }) => ({
       youtube: Boolean(getProviderConfig("youtube").clientId) || Boolean(ctx.user && await db.getProviderSettings(ctx.user.id, "youtube")),

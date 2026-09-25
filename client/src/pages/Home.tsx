@@ -131,7 +131,7 @@ export default function Home() {
     [],
   );
   const snapshot = data ?? fallback;
-  const hasLiveData = snapshot.freshness.startsWith("Live native API data");
+  const hasLiveData = snapshot.freshness.startsWith("Persisted provider snapshots");
   const largestEvent = snapshot.events.find((event) => event.type === "drop") ?? snapshot.events[0];
 
   const requestAdvisory = () => {
@@ -339,7 +339,7 @@ export default function Home() {
             <MetricCard
               label="Cross-channel signal"
               value={`${snapshot.channels.length} channel${snapshot.channels.length === 1 ? "" : "s"}`}
-              detail={hasLiveData ? "Connected provider sources" : "Demo fallback · connect a channel"}
+              detail={hasLiveData ? "Persisted provider snapshot sources" : snapshot.freshness.includes("awaiting") ? "Background sync pending" : "Demo fallback · connect a channel"}
               icon={Radio}
               accent="bg-[#93c5fd]/20"
             />

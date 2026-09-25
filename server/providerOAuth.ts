@@ -3,6 +3,7 @@ import type { Express, Request, Response } from "express";
 import { createContext } from "./_core/context";
 import * as db from "./db";
 import { decryptSecret, encryptSecret, exchangeProviderCode, fetchAggregateSnapshot, Provider, ProviderCredentials, refreshProviderToken } from "./providers";
+import { ENV } from "./_core/env";
 
 const STATE_COOKIE = "__Host-provider_oauth_state";
 const PROVIDER_COOKIE = "__Host-provider_oauth_provider";
@@ -18,8 +19,9 @@ export function registerProviderOAuthRoutes(app: Express) {
     const code = getQueryParam(req, "code");
     const state = getQueryParam(req, "state");
     const cookies = parseCookieHeader(req.headers.cookie ?? "");
-    const provider = cookies[PROVIDER_COOKIE] as Provider | undefined;
-    if (!code || !state || !provider || state !== cookies[STATE_COOKIE]) {
+    const providerValue = cookies[PROVIDER_COOKIE];
+    const provider = providerValue as Provider | undefined;
+    if (!code || !state || !provider || !["youtube", "instagram", "tiktok"].includes(providerValue ?? "") || state !== cookies[STATE_COOKIE]) {
       res.status(403).json({ error: "Invalid provider OAuth state." });
       return;
     }
@@ -35,6 +37,13 @@ export function registerProviderOAuthRoutes(app: Express) {
       const origin = cookies[ORIGIN_COOKIE];
       if (!origin) {
         res.redirect("/?connection_error=origin_missing");
+        return;
+      }
+      const requestProtocol = String(req.headers["x-forwarded-proto"] ?? req.protocol ?? "https").split(",")[0].trim();
+      const requestHost = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0].trim();
+      const requestOrigin = requestHost ? `${requestProtocol}://${requestHost}` : "";
+      if (origin !== requestOrigin && !ENV.allowedAppOrigins.includes(origin)) {
+        res.redirect("/?connection_error=origin_not_allowed");
         return;
       }
       const redirectUri = `${origin}/api/provider-oauth/callback`;

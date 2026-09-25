@@ -13,6 +13,13 @@ type ProviderConfig = {
 
 export type ProviderCredentials = { clientId: string; clientSecret: string; scopes?: string[] };
 
+export class ProviderApiError extends Error {
+  constructor(public readonly status: number, message: string, public readonly retryAfterMs?: number) {
+    super(message);
+    this.name = "ProviderApiError";
+  }
+}
+
 export type ProviderTokenResponse = {
   access_token: string;
   refresh_token?: string;
@@ -188,13 +195,19 @@ export function decryptSecret(value: string) {
 
 async function getJson(url: URL, accessToken: string) {
   const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-  if (!response.ok) throw new Error(`Provider API request failed (${response.status})`);
+  if (!response.ok) {
+    const retryAfter = Number(response.headers.get("retry-after") ?? 0);
+    throw new ProviderApiError(response.status, `Provider API request failed (${response.status})`, retryAfter > 0 ? retryAfter * 1000 : undefined);
+  }
   return response.json() as Promise<Record<string, any>>;
 }
 
 async function postJson(url: URL, accessToken: string, body: unknown) {
   const response = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error(`Provider API request failed (${response.status})`);
+  if (!response.ok) {
+    const retryAfter = Number(response.headers.get("retry-after") ?? 0);
+    throw new ProviderApiError(response.status, `Provider API request failed (${response.status})`, retryAfter > 0 ? retryAfter * 1000 : undefined);
+  }
   return response.json() as Promise<Record<string, any>>;
 }
 
