@@ -2,6 +2,23 @@
 
 ## 1. Remaining production-risk audit
 
+### Environment verification
+
+The release environment must provide the following values. Verify presence by name only; never print their values in logs or deployment output:
+
+| Variable | Required before provider onboarding? | Purpose |
+|---|---:|---|
+| `APP_ORIGIN` or `ALLOWED_APP_ORIGINS` | Yes | Trusted OAuth callback origin allowlist |
+| `PROVIDER_TOKEN_ENCRYPTION_KEY` | Yes | AES-256-GCM token encryption key |
+| `YOUTUBE_CLIENT_ID` | For YouTube | Server-side OAuth client identifier |
+| `YOUTUBE_CLIENT_SECRET` | For YouTube | Server-side OAuth client secret |
+| `INSTAGRAM_CLIENT_ID` | For Instagram | Server-side Meta/Instagram app identifier |
+| `INSTAGRAM_CLIENT_SECRET` | For Instagram | Server-side Meta/Instagram app secret |
+| `TIKTOK_CLIENT_KEY` | For TikTok | Server-side TikTok client key |
+| `TIKTOK_CLIENT_SECRET` | For TikTok | Server-side TikTok client secret |
+
+This sandbox has none of these values configured, so no real provider or target-database verification was claimed.
+
 ### Release-blocking risks
 
 - **Provider credentials and app approval:** YouTube, Instagram, and TikTok OAuth cannot be declared production-ready until each provider has real staging credentials, exact redirect URI registration, approved scopes, and a test account with the required account type.
@@ -39,6 +56,8 @@ FROM provider_settings
 GROUP BY userId, provider
 HAVING COUNT(*) > 1;
 ```
+
+The migration and schema must remain aligned before deployment: `connected_channels.lastError` corresponds to the additive column, `connected_user_provider_unique` and `provider_settings_user_provider_unique` correspond to the two schema `uniqueIndex` declarations, and `connected_user_status_idx` corresponds to the schema status index. The migration is present in the repository but has not been applied to a target database in this environment.
 
 4. For each duplicate connected channel, retain the newest valid token/account row, revoke or remove stale rows, and preserve the most recent `lastSyncedAt`/status where appropriate.
 5. For duplicate provider settings, retain the newest row. Never print decrypted credentials while resolving duplicates.

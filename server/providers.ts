@@ -12,6 +12,8 @@ type ProviderConfig = {
 };
 
 export type ProviderCredentials = { clientId: string; clientSecret: string; scopes?: string[] };
+type ProviderStateRecord = { userId?: number; provider?: Provider; expiresAt: number };
+const providerStates = new Map<string, ProviderStateRecord>();
 
 export class ProviderApiError extends Error {
   constructor(public readonly status: number, message: string, public readonly retryAfterMs?: number) {
@@ -85,8 +87,17 @@ export function assertProviderConfigured(provider: Provider, credentials?: Provi
   return config;
 }
 
-export function createProviderState() {
-  return randomBytes(32).toString("base64url");
+export function createProviderState(metadata: { userId?: number; provider?: Provider } = {}) {
+  const state = randomBytes(32).toString("base64url");
+  providerStates.set(state, { ...metadata, expiresAt: Date.now() + 10 * 60 * 1000 });
+  return state;
+}
+export function consumeProviderState(state: string, expected: { userId?: number; provider?: Provider }) {
+  const record = providerStates.get(state);
+  providerStates.delete(state);
+  if (!record || record.expiresAt <= Date.now()) return false;
+  if (record.userId !== expected.userId || record.provider !== expected.provider) return false;
+  return true;
 }
 
 export function buildProviderAuthorizationUrl(provider: Provider, redirectUri: string, state: string, credentials?: ProviderCredentials) {
@@ -126,7 +137,10 @@ export async function exchangeProviderCode(provider: Provider, code: string, red
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
-  if (!response.ok) throw new Error(`Provider token exchange failed (${response.status})`);
+  if (!response.ok) {
+    const retryAfter = Number(response.headers.get("retry-after") ?? 0);
+    throw new ProviderApiError(response.status, `Provider token exchange failed (${response.status})`, retryAfter > 0 ? retryAfter * 1000 : undefined);
+  }
   return (await response.json()) as ProviderTokenResponse;
 }
 
@@ -147,7 +161,10 @@ export async function refreshProviderToken(provider: Provider, refreshToken: str
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
-  if (!response.ok) throw new Error(`Provider token refresh failed (${response.status})`);
+  if (!response.ok) {
+    const retryAfter = Number(response.headers.get("retry-after") ?? 0);
+    throw new ProviderApiError(response.status, `Provider token refresh failed (${response.status})`, retryAfter > 0 ? retryAfter * 1000 : undefined);
+  }
   return (await response.json()) as ProviderTokenResponse;
 }
 

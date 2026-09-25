@@ -27,13 +27,13 @@ function retryable(error: unknown) {
   return error instanceof ProviderApiError && (error.status === 408 || error.status === 429 || error.status >= 500);
 }
 
-async function withRetry<T>(operation: () => Promise<T>) {
+export async function withRetry<T>(operation: () => Promise<T>, sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
       return await operation();
     } catch (error) {
       if (!retryable(error) || attempt === MAX_ATTEMPTS) throw error;
-      await new Promise((resolve) => setTimeout(resolve, retryDelay(error, attempt)));
+      await sleep(retryDelay(error, attempt));
     }
   }
   throw new Error("Sync retry loop exhausted.");
@@ -55,7 +55,7 @@ export async function syncConnectedChannel(
   activeSyncs.add(lockKey);
 
   try {
-    const refreshed = await refreshConnectionIfNeeded(channel, credentials);
+    const refreshed = await withRetry(() => refreshConnectionIfNeeded(channel, credentials));
     const snapshot = await withRetry(() => fetchAggregateSnapshot(provider, decryptSecret(refreshed.accessTokenEncrypted)));
     await db.createAudienceSnapshot({
       userId,

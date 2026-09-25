@@ -2,12 +2,15 @@ import { parse as parseCookieHeader } from "cookie";
 import type { Express, Request, Response } from "express";
 import { createContext } from "./_core/context";
 import * as db from "./db";
-import { decryptSecret, encryptSecret, exchangeProviderCode, fetchAggregateSnapshot, Provider, ProviderCredentials, refreshProviderToken } from "./providers";
+import { consumeProviderState, decryptSecret, encryptSecret, exchangeProviderCode, fetchAggregateSnapshot, Provider, ProviderCredentials, refreshProviderToken } from "./providers";
 import { ENV } from "./_core/env";
 
 const STATE_COOKIE = "__Host-provider_oauth_state";
 const PROVIDER_COOKIE = "__Host-provider_oauth_provider";
 const ORIGIN_COOKIE = "__Host-provider_oauth_origin";
+export function isSupportedProvider(value: string | undefined): value is Provider {
+  return value === "youtube" || value === "instagram" || value === "tiktok";
+}
 
 function getQueryParam(req: Request, key: string) {
   const value = req.query[key];
@@ -21,7 +24,7 @@ export function registerProviderOAuthRoutes(app: Express) {
     const cookies = parseCookieHeader(req.headers.cookie ?? "");
     const providerValue = cookies[PROVIDER_COOKIE];
     const provider = providerValue as Provider | undefined;
-    if (!code || !state || !provider || !["youtube", "instagram", "tiktok"].includes(providerValue ?? "") || state !== cookies[STATE_COOKIE]) {
+    if (!code || !state || !provider || !isSupportedProvider(providerValue) || state !== cookies[STATE_COOKIE]) {
       res.status(403).json({ error: "Invalid provider OAuth state." });
       return;
     }
@@ -44,6 +47,10 @@ export function registerProviderOAuthRoutes(app: Express) {
       const requestOrigin = requestHost ? `${requestProtocol}://${requestHost}` : "";
       if (origin !== requestOrigin && !ENV.allowedAppOrigins.includes(origin)) {
         res.redirect("/?connection_error=origin_not_allowed");
+        return;
+      }
+      if (!consumeProviderState(state, { userId: context.user.id, provider })) {
+        res.status(403).json({ error: "Expired, replayed, or mismatched provider OAuth state." });
         return;
       }
       const redirectUri = `${origin}/api/provider-oauth/callback`;
