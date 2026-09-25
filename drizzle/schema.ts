@@ -1,4 +1,4 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, json, bigint } from "drizzle-orm/mysql-core";
+import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, json, bigint, index, uniqueIndex } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
@@ -62,9 +62,10 @@ export const connectedChannels = mysqlTable("connected_channels", {
   scopes: text("scopes"),
   lastSyncedAt: timestamp("lastSyncedAt"),
   status: varchar("status", { length: 32 }).default("connected").notNull(),
+  lastError: varchar("lastError", { length: 512 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-});
+}, (table) => [uniqueIndex("connected_user_provider_unique").on(table.userId, table.provider), index("connected_user_status_idx").on(table.userId, table.status)]);
 
 export const providerSettings = mysqlTable("provider_settings", {
   id: int("id").autoincrement().primaryKey(),
@@ -77,7 +78,7 @@ export const providerSettings = mysqlTable("provider_settings", {
   enabled: int("enabled").default(1).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
-});
+}, (table) => [uniqueIndex("provider_settings_user_provider_unique").on(table.userId, table.provider)]);
 
 export const contentAssets = mysqlTable("content_assets", {
   id: int("id").autoincrement().primaryKey(),

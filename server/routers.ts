@@ -19,6 +19,10 @@ async function userProviderCredentials(userId: number, provider: Provider): Prom
   return row ? { clientId: decryptSecret(row.clientIdEncrypted), clientSecret: decryptSecret(row.clientSecretEncrypted), scopes: row.scopes?.split(",").filter(Boolean) } : undefined;
 }
 
+function providerErrorMessage(error: unknown) {
+  return String(error instanceof Error ? error.message : error).replace(/\s+/g, " ").slice(0, 512);
+}
+
 function sessionToken(ctx: any) {
   return parseCookieHeader(ctx.req.headers.cookie ?? "")[COOKIE_NAME] ?? "";
 }
@@ -52,6 +56,7 @@ export const appRouter = router({
               return snapshot;
             } catch (error) {
               console.warn(`[${channel.provider}] live sync failed`, error);
+              await db.updateConnectedChannel(channel.id, { status: "error", lastError: providerErrorMessage(error) }).catch(() => undefined);
               return null;
             }
           }));
@@ -162,11 +167,16 @@ export const appRouter = router({
     sync: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]) })).mutation(async ({ ctx, input }) => {
       const channel = await db.getConnectedChannel(ctx.user.id, input.provider);
       if (!channel) throw new Error("Connect this provider first.");
-      const refreshed = await refreshConnectionIfNeeded(channel, await userProviderCredentials(ctx.user.id, input.provider));
-      const snapshot = await fetchAggregateSnapshot(input.provider, decryptSecret(refreshed.accessTokenEncrypted));
-      await db.createAudienceSnapshot({ userId: ctx.user.id, channel: snapshot.provider, reach: snapshot.reach, impressions: snapshot.impressions, followers: snapshot.followers, engagement: snapshot.engagement, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
-      await db.updateConnectedChannel(channel.id, { accountName: snapshot.accountName, lastSyncedAt: new Date(), status: "connected" });
-      return snapshot;
+      try {
+        const refreshed = await refreshConnectionIfNeeded(channel, await userProviderCredentials(ctx.user.id, input.provider));
+        const snapshot = await fetchAggregateSnapshot(input.provider, decryptSecret(refreshed.accessTokenEncrypted));
+        await db.createAudienceSnapshot({ userId: ctx.user.id, channel: snapshot.provider, reach: snapshot.reach, impressions: snapshot.impressions, followers: snapshot.followers, engagement: snapshot.engagement, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
+        await db.updateConnectedChannel(channel.id, { accountName: snapshot.accountName, lastSyncedAt: new Date(), status: "connected", lastError: null });
+        return snapshot;
+      } catch (error) {
+        await db.updateConnectedChannel(channel.id, { status: "error", lastError: providerErrorMessage(error) }).catch(() => undefined);
+        throw error;
+      }
     }),
     config: publicProcedure.query(async ({ ctx }) => ({
       youtube: Boolean(getProviderConfig("youtube").clientId) || Boolean(ctx.user && await db.getProviderSettings(ctx.user.id, "youtube")),

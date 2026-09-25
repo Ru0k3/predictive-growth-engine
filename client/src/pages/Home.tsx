@@ -31,17 +31,9 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { startLogin } from "@/const";
+import { useLocation } from "wouter";
 
-const retentionData = [
-  { position: "0%", attention: 94 },
-  { position: "14%", attention: 91 },
-  { position: "28%", attention: 86 },
-  { position: "42%", attention: 62 },
-  { position: "56%", attention: 58 },
-  { position: "70%", attention: 59 },
-  { position: "84%", attention: 43 },
-  { position: "100%", attention: 40 },
-];
+const retentionData: Array<{ position: string; attention: number }> = [];
 
 const navItems = [
   { label: "Overview", icon: Gauge, active: true },
@@ -89,12 +81,14 @@ function MetricCard({
 }
 
 export default function Home() {
+  const [, setLocation] = useLocation();
   const { user, isAuthenticated, logout } = useAuth();
   const { data, isLoading, refetch } = trpc.analysis.dashboard.useQuery();
   const connections = trpc.connections.list.useQuery();
   const providerConfig = trpc.connections.config.useQuery();
   const startConnection = trpc.connections.start.useMutation();
   const disconnectConnection = trpc.connections.disconnect.useMutation({ onSuccess: () => connections.refetch() });
+  const syncConnection = trpc.connections.sync.useMutation({ onSuccess: () => { void connections.refetch(); void refetch(); } });
   const contentAssets = trpc.content.list.useQuery(undefined, { enabled: isAuthenticated });
   const uploadContent = trpc.content.upload.useMutation({ onSuccess: () => contentAssets.refetch() });
   const [selectedAssetId, setSelectedAssetId] = useState<number | null>(null);
@@ -113,6 +107,7 @@ export default function Home() {
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
   const advisory = trpc.analysis.advisory.useMutation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [audienceHelpOpen, setAudienceHelpOpen] = useState(false);
   const historyChart = useMemo(() => {
     const grouped = new Map<string, { date: string; totalReach: number; totalFollowers: number; totalEngagement: number }>();
     for (const row of history.data ?? []) { const date = new Date(row.observedAt).toLocaleDateString([], { month: "short", day: "numeric" }); const current = grouped.get(date) ?? { date, totalReach: 0, totalFollowers: 0, totalEngagement: 0 }; current.totalReach += row.reach ?? 0; current.totalFollowers = Math.max(current.totalFollowers, row.followers ?? 0); current.totalEngagement += row.engagement ?? 0; grouped.set(date, current); }
@@ -136,6 +131,7 @@ export default function Home() {
     [],
   );
   const snapshot = data ?? fallback;
+  const hasLiveData = snapshot.freshness.startsWith("Live native API data");
   const largestEvent = snapshot.events.find((event) => event.type === "drop") ?? snapshot.events[0];
 
   const requestAdvisory = () => {
@@ -213,6 +209,7 @@ export default function Home() {
             <button
               key={label}
               className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm transition ${active ? "bg-white/10 font-medium text-[#a6f1c6]" : "text-[#91a0b4] hover:bg-white/5 hover:text-white"}`}
+              onClick={() => { setMobileNavOpen(false); const target = label === "Connect channels" ? "connections" : label === "Audience overlap" ? "audience-model" : label === "Content signals" ? "content-signals" : null; if (target) document.getElementById(target)?.scrollIntoView({ behavior: "smooth" }); else window.scrollTo({ top: 0, behavior: "smooth" }); }}
             >
               <Icon size={16} />
               {label}
@@ -308,7 +305,7 @@ export default function Home() {
             </div>
           </div>
 
-          <Card className="mb-7 border-0 bg-[#101923] text-white shadow-[0_16px_50px_rgba(39,56,72,.12)]">
+          <Card id="connections" className="mb-7 border-0 bg-[#101923] text-white shadow-[0_16px_50px_rgba(39,56,72,.12)]">
             <CardContent className="p-5 sm:p-6">
               <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-center">
                 <div>
@@ -327,7 +324,7 @@ export default function Home() {
                   })}
                 </div>
               </div>
-              {connections.data?.length ? <div className="mt-4 flex flex-wrap gap-2 border-t border-white/10 pt-4">{connections.data.map((connection) => <button key={connection.id} onClick={() => disconnectConnection.mutate({ id: connection.id })} className="flex items-center gap-2 rounded-lg border border-white/10 px-2.5 py-1.5 text-[10px] text-[#9aabba] hover:border-[#f49c9c]/40 hover:text-[#ffd0d0]">Disconnect {connection.accountName}<span className="text-[#718397]">· revoke token</span></button>)}</div> : null}
+              {connections.data?.length ? <div className="mt-4 flex flex-wrap gap-2 border-t border-white/10 pt-4">{connections.data.map((connection) => <div key={connection.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 px-2.5 py-1.5 text-[10px] text-[#9aabba]"><span>{connection.accountName} · {connection.status}</span><button onClick={() => syncConnection.mutate({ provider: connection.provider as "youtube" | "instagram" | "tiktok" })} disabled={syncConnection.isPending} className="text-[#a6f1c6]">{syncConnection.isPending ? "Syncing…" : "Sync now"}</button><button onClick={() => disconnectConnection.mutate({ id: connection.id })} disabled={disconnectConnection.isPending} className="text-[#ffd0d0]">Disconnect</button></div>)}</div> : null}
             </CardContent>
           </Card>
 
@@ -341,22 +338,22 @@ export default function Home() {
             />
             <MetricCard
               label="Cross-channel signal"
-              value="4 channels"
-              detail="Native + owned audience sources"
+              value={`${snapshot.channels.length} channel${snapshot.channels.length === 1 ? "" : "s"}`}
+              detail={hasLiveData ? "Connected provider sources" : "Demo fallback · connect a channel"}
               icon={Radio}
               accent="bg-[#93c5fd]/20"
             />
             <MetricCard
               label="Attention retained"
-              value="58.4%"
-              detail="+6.2% vs. previous snapshot"
+              value="Not exposed"
+              detail="Provider-native retention only"
               icon={Activity}
               accent="bg-[#f6c980]/20"
             />
             <MetricCard
               label="AI opportunities"
-              value={String(Math.max(snapshot.events.length, 3))}
-              detail="2 high-confidence signals"
+              value={String(snapshot.events.length)}
+              detail={snapshot.events.length ? "Modelled from current snapshot" : "No signals available"}
               icon={Bot}
               accent="bg-[#f49c9c]/20"
             />
@@ -373,7 +370,7 @@ export default function Home() {
           </Card>
 
           <div className="mt-7 grid gap-6 xl:grid-cols-[minmax(0,1.65fr)_minmax(330px,.8fr)]">
-            <Card className="border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
+            <Card id="content-signals" className="border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
               <CardHeader className="flex-row items-start justify-between pb-2">
                 <div>
                   <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8895a0]">
@@ -381,12 +378,13 @@ export default function Home() {
                   </div>
                   <CardTitle className="text-lg tracking-[-0.02em] text-[#22303d]">Attention curve · latest asset</CardTitle>
                 </div>
-                <button className="text-xs font-medium text-[#4a9b71] hover:text-[#27744b]">
+                <button onClick={() => document.getElementById("content-evidence")?.scrollIntoView({ behavior: "smooth" })} className="text-xs font-medium text-[#4a9b71] hover:text-[#27744b]">
                   View details <ArrowUpRight size={13} className="ml-1 inline" />
                 </button>
               </CardHeader>
               <CardContent className="pt-5">
-                <div className="h-[250px] w-full">
+                <div className="relative h-[250px] w-full">
+                  {!retentionData.length && <div className="absolute inset-0 z-10 grid place-items-center rounded-xl border border-dashed border-[#cbded2] bg-[#f8fbf9] p-6 text-center text-xs leading-relaxed text-[#81918a]">Retention curves are not available from aggregate snapshots. Connect a provider with native retention metrics and review them in Targeted video signals.</div>}
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={retentionData} margin={{ top: 8, right: 8, left: -25, bottom: 0 }}>
                       <defs>
@@ -441,13 +439,13 @@ export default function Home() {
           </div>
 
           <div className="mt-7 grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
-            <Card className="border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
+            <Card id="audience-model" className="border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
               <CardHeader className="flex-row items-start justify-between">
                 <div>
                   <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8895a0]"><Users size={13} className="text-[#4a9b71]" /> Audience model</div>
                   <CardTitle className="text-lg tracking-[-0.02em] text-[#22303d]">One audience, four signals</CardTitle>
                 </div>
-                <button className="text-[#8a98a3] hover:text-[#4a9b71]" aria-label="About audience model"><CircleHelp size={17} /></button>
+                <button onClick={() => setAudienceHelpOpen((open) => !open)} className="text-[#8a98a3] hover:text-[#4a9b71]" aria-label="About audience model"><CircleHelp size={17} /></button>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
@@ -462,10 +460,11 @@ export default function Home() {
                   ))}
                 </div>
                 <div className="mt-6 flex items-start gap-3 rounded-xl bg-[#f7faf8] p-3.5"><LockKeyhole size={15} className="mt-0.5 shrink-0 text-[#4a9b71]" /><p className="text-[11px] leading-relaxed text-[#718078]">Reach is deduplicated statistically using demographic vectors. No person-level identity is collected or inferred.</p></div>
+                {audienceHelpOpen && <div className="mt-3 rounded-xl border border-[#dce9e1] bg-[#f8fbf9] p-3 text-[11px] leading-relaxed text-[#60746a]">The overlap model estimates unique reach from provider aggregates. Demographic vectors are only treated as real when the provider exposes them; fixed fallback vectors are not demographic measurements.</div>}
               </CardContent>
             </Card>
 
-            <Card className="border-0 bg-[#111924] text-white shadow-[0_16px_50px_rgba(39,56,72,.12)]">
+            <Card id="methodology" className="border-0 bg-[#111924] text-white shadow-[0_16px_50px_rgba(39,56,72,.12)]">
               <CardHeader><div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#7c8b9d]"><FlaskConical size={13} className="text-[#a6f1c6]" /> Model notes</div><CardTitle className="text-lg tracking-[-0.02em]">A transparent signal stack</CardTitle></CardHeader>
               <CardContent>
                 <div className="space-y-4">
@@ -481,7 +480,7 @@ export default function Home() {
             </Card>
           </div>
 
-          <Card className="mt-7 border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
+          <Card id="content-evidence" className="mt-7 border-0 bg-white shadow-[0_16px_50px_rgba(39,56,72,.07)]">
             <CardHeader className="flex-row items-start justify-between gap-4">
               <div>
                 <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8895a0]"><UploadCloud size={13} className="text-[#4a9b71]" /> Content evidence lab</div>
@@ -511,7 +510,7 @@ export default function Home() {
             </CardContent>
           </Card>
 
-          <footer className="mt-10 flex flex-col justify-between gap-3 border-t border-[#dde4e7] pt-5 text-[10px] text-[#8a97a1] sm:flex-row"><div className="flex items-center gap-2"><ShieldCheck size={13} className="text-[#4a9b71]" />Privacy-first by default · aggregate data only</div><div className="flex items-center gap-4"><span>Last updated {snapshot.refreshedAt ? new Date(snapshot.refreshedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</span><a href="#" className="flex items-center gap-1 hover:text-[#4a9b71]">Methodology <ExternalLink size={11} /></a></div></footer>
+          <footer className="mt-10 flex flex-col justify-between gap-3 border-t border-[#dde4e7] pt-5 text-[10px] text-[#8a97a1] sm:flex-row"><div className="flex items-center gap-2"><ShieldCheck size={13} className="text-[#4a9b71]" />Privacy-first by default · aggregate data only</div><div className="flex items-center gap-4"><span>Last updated {snapshot.refreshedAt ? new Date(snapshot.refreshedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</span><a href="#methodology" className="flex items-center gap-1 hover:text-[#4a9b71]">Methodology <ExternalLink size={11} /></a><button onClick={() => setLocation("/settings")} className="hover:text-[#4a9b71]">Provider settings</button></div></footer>
         </div>
       </main>
     </div>

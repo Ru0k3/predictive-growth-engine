@@ -101,6 +101,7 @@ export async function listConnectedChannels(userId: number) {
     accessTokenExpiresAt: connectedChannels.accessTokenExpiresAt,
     lastSyncedAt: connectedChannels.lastSyncedAt,
     status: connectedChannels.status,
+    lastError: connectedChannels.lastError,
   }).from(connectedChannels).where(eq(connectedChannels.userId, userId)).orderBy(desc(connectedChannels.updatedAt));
 }
 
@@ -188,6 +189,7 @@ export async function upsertConnectedChannel(values: typeof connectedChannels.$i
     refreshTokenExpiresAt: values.refreshTokenExpiresAt,
     scopes: values.scopes,
     status: "connected" as const,
+    lastError: null,
     lastSyncedAt: values.lastSyncedAt,
     updatedAt: new Date(),
   };
