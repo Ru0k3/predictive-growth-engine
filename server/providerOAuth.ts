@@ -2,7 +2,7 @@ import { parse as parseCookieHeader } from "cookie";
 import type { Express, Request, Response } from "express";
 import { createContext } from "./_core/context";
 import * as db from "./db";
-import { consumeProviderState, decryptSecret, encryptSecret, exchangeProviderCode, fetchAggregateSnapshot, Provider, ProviderCredentials, refreshProviderToken } from "./providers";
+import { consumeProviderState, decryptSecret, encryptSecret, exchangeProviderCode, Provider, ProviderCredentials, refreshProviderToken } from "./providers";
 import { ENV } from "./_core/env";
 
 const STATE_COOKIE = "__Host-provider_oauth_state";
@@ -57,21 +57,19 @@ export function registerProviderOAuthRoutes(app: Express) {
       const configured = await db.getProviderSettings(context.user.id, provider);
       const credentials: ProviderCredentials | undefined = configured ? { clientId: decryptSecret(configured.clientIdEncrypted), clientSecret: decryptSecret(configured.clientSecretEncrypted), scopes: configured.scopes?.split(",").filter(Boolean) } : undefined;
       const token = await exchangeProviderCode(provider, code, redirectUri, credentials);
-      const snapshot = await fetchAggregateSnapshot(provider, token.access_token);
       const now = Date.now();
-      await db.createAudienceSnapshot({ userId: context.user.id, channel: snapshot.provider, reach: snapshot.reach, impressions: snapshot.impressions, followers: snapshot.followers, engagement: snapshot.engagement, demographicVector: snapshot.demographicVector, observedAt: new Date(snapshot.observedAt), source: snapshot.source, createdAt: new Date() });
       await db.upsertConnectedChannel({
         userId: context.user.id,
         provider,
-        externalAccountId: snapshot.externalAccountId,
-        accountName: snapshot.accountName,
+        externalAccountId: token.open_id ?? `${provider}:${context.user.id}`,
+        accountName: `${provider[0]!.toUpperCase()}${provider.slice(1)} account`,
         accessTokenEncrypted: encryptSecret(token.access_token),
         refreshTokenEncrypted: token.refresh_token ? encryptSecret(token.refresh_token) : null,
         accessTokenExpiresAt: token.expires_in ? new Date(now + token.expires_in * 1000) : null,
         refreshTokenExpiresAt: token.refresh_expires_in ? new Date(now + token.refresh_expires_in * 1000) : null,
         scopes: token.scope ?? null,
-        lastSyncedAt: new Date(),
-        status: "connected",
+        lastSyncedAt: null,
+        status: "pending",
         createdAt: new Date(),
         updatedAt: new Date(),
       });
