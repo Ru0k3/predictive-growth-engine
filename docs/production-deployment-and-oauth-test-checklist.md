@@ -37,12 +37,23 @@ This sandbox has none of these values configured, so no real provider or target-
 - **Data deletion and backup:** Confirm backups, restore testing, user deletion behavior, encrypted-token destruction, and provider disconnect/revocation procedures before onboarding real customers.
 - **Observability:** Add alerts for repeated provider errors, stale snapshots, failed heartbeat callbacks, refresh-token failures, and unusual snapshot volume. Logs must not include access tokens, refresh tokens, client secrets, or authorization codes.
 
-## 2. Database migration deployment plan
+## 2. Database-backed distributed state and lease design
+
+This implementation uses the existing MySQL/TiDB database rather than introducing Redis. Migration `0006_distributed_state_leases.sql` creates two tables:
+
+- `oauth_states`: stores a random state token, authenticated user, provider, creation time, and ten-minute expiry. Callback consumption is an atomic `DELETE` requiring the state, user, provider, and a future expiry, so a state can succeed only once and cannot be transferred between users/providers.
+- `sync_leases`: has a primary key on `(userId, provider)`, a random lease token, and expiry. Acquisition first conditionally replaces an expired lease, otherwise attempts an insert. A duplicate-key result means another worker owns the lease. Release deletes only when the lease token matches, so an old worker cannot release a newer worker's lease.
+
+The lease duration is two minutes and must exceed the expected provider request plus bounded retry window. If a worker crashes, another worker can take the lease after expiry. This is safe across application instances, unlike the previous process-local `Map`/`Set` implementation. The lease is not a heartbeat; if a sync can exceed two minutes in production, add lease renewal before increasing provider concurrency.
+
+The database-backed design requires the migration before enabling multi-instance OAuth or sync workers. It also requires monitoring for expired lease takeovers, orphaned OAuth states, and database latency. A Redis implementation would be appropriate if the platform already operates Redis, using `SET key value NX PX` and a compare-and-delete Lua release; adding Redis is intentionally avoided here to keep the deployment dependency set unchanged.
+
+## 3. Database migration deployment plan
 
 ### Preflight in a staging clone
 
 1. Take a current database backup and verify that it can be restored to an isolated database.
-2. Confirm the deployed application is at or before the commit that introduces migration 0005.
+2. Confirm the deployed application is at or before the commit that introduces migrations 0005 and 0006.
 3. Check for duplicates:
 
 ```sql
@@ -62,13 +73,17 @@ The migration and schema must remain aligned before deployment: `connected_chann
 4. For each duplicate connected channel, retain the newest valid token/account row, revoke or remove stale rows, and preserve the most recent `lastSyncedAt`/status where appropriate.
 5. For duplicate provider settings, retain the newest row. Never print decrypted credentials while resolving duplicates.
 6. Confirm the database user can run `ALTER TABLE`, create indexes, and read/write the affected tables.
-7. Apply the migration to staging using the repository migration mechanism. Do not use an ad-hoc schema push against production.
+7. Apply migrations 0005 and 0006 to staging using the repository migration mechanism. Do not use an ad-hoc schema push against production.
 8. Verify:
 
 ```sql
 SHOW COLUMNS FROM connected_channels LIKE 'lastError';
 SHOW INDEX FROM connected_channels;
 SHOW INDEX FROM provider_settings;
+SHOW COLUMNS FROM oauth_states;
+SHOW INDEX FROM oauth_states;
+SHOW COLUMNS FROM sync_leases;
+SHOW INDEX FROM sync_leases;
 ```
 
 9. Run application tests, authenticated snapshot reads, manual sync, scheduled sync, disconnect, and provider-not-configured checks against staging.
@@ -78,7 +93,7 @@ SHOW INDEX FROM provider_settings;
 1. Announce a short sync maintenance window; dashboard reads can remain available because the migration is additive, but pause scheduled sync during the DDL if the database provider requires it.
 2. Take and verify a production backup immediately before migration.
 3. Confirm no duplicate preflight rows remain.
-4. Apply `drizzle/0005_stable_signal.sql` exactly once through the deployment migration runner.
+4. Apply `drizzle/0005_stable_signal.sql` and `drizzle/0006_distributed_state_leases.sql` exactly once through the deployment migration runner.
 5. Verify the column and indexes, then deploy the application commit containing the snapshot-only dashboard and shared worker.
 6. Re-enable heartbeat schedules gradually, starting with one internal/staging user and then a small production cohort.
 7. Confirm each cohort receives one snapshot per provider, errors persist without token leakage, and dashboard freshness advances after the worker runs.
@@ -91,7 +106,7 @@ SHOW INDEX FROM provider_settings;
 - If the new worker causes provider load or callback failures, disable heartbeat tasks and use the prior application release while preserving the migration.
 - Do not drop the unique constraints as a first response to an application bug; investigate data ownership and task duplication first.
 
-## 3. OAuth callback verification checklist
+## 4. OAuth callback verification checklist
 
 For each provider, execute with a real staging developer app and a dedicated test account.
 
@@ -125,12 +140,12 @@ For each provider, execute with a real staging developer app and a dedicated tes
 - [ ] Access token is encrypted at rest with `PROVIDER_TOKEN_ENCRYPTION_KEY`.
 - [ ] Refresh token, when supplied, is encrypted separately.
 - [ ] Plaintext tokens are absent from database rows, API responses, logs, and error messages.
-- [ ] Provider account ID, display name, granted scopes, expiry, and last-sync time are stored correctly.
-- [ ] Initial snapshot is created only after the provider account has been resolved.
+- [ ] Encrypted tokens, a pending connection, granted scopes, and expiry are stored correctly; the worker later replaces the provisional account identity.
+- [ ] The first provider identity lookup and initial snapshot are created by the background sync worker, not the OAuth callback.
 - [ ] Provider-specific metric mappings are checked against the provider response fixture.
 - [ ] Dashboard shows persisted snapshot freshness and does not make an API call during page load.
 
-## 4. Token refresh verification checklist
+## 5. Token refresh verification checklist
 
 - [ ] Valid, non-expired access token is used without a refresh request.
 - [ ] Token inside the five-minute expiry window refreshes before provider data fetch.
@@ -144,7 +159,7 @@ For each provider, execute with a real staging developer app and a dedicated tes
 - [ ] Disconnect revokes the current access token where supported and deletes the local connection row.
 - [ ] After disconnect, scheduled sync skips the provider and no token remains usable locally.
 
-## 5. Rate-limit and outage verification checklist
+## 6. Rate-limit and outage verification checklist
 
 - [ ] Provider 429 response with `Retry-After: 2` waits approximately two seconds before retrying.
 - [ ] Provider 429 response without `Retry-After` uses exponential backoff.
@@ -160,7 +175,7 @@ For each provider, execute with a real staging developer app and a dedicated tes
 - [ ] Snapshot row count and provider request count are monitored for unexpected amplification.
 - [ ] Provider outages do not replace prior good snapshots with zeros; the last successful snapshot remains available with stale/error status visible.
 
-## 6. Post-deploy acceptance checks
+## 7. Post-deploy acceptance checks
 
 - [ ] Unauthenticated dashboard uses clearly labeled demo fallback data.
 - [ ] Authenticated workspace with no snapshots shows `awaiting background sync`.

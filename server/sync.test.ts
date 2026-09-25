@@ -45,6 +45,9 @@ describe("controlled provider sync", () => {
   it("prevents overlapping syncs for the same user and provider", async () => {
     process.env.PROVIDER_TOKEN_ENCRYPTION_KEY = "sync-test-key";
     vi.spyOn(db, "getConnectedChannel").mockResolvedValue({ id: 8, userId: 4, provider: "youtube", externalAccountId: "channel", accountName: "Channel", accessTokenEncrypted: encryptSecret("access"), refreshTokenEncrypted: null, accessTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), refreshTokenExpiresAt: null, scopes: null, lastSyncedAt: null, status: "connected", lastError: null, createdAt: new Date(), updatedAt: new Date() });
+    let leaseHeld = false;
+    vi.spyOn(db, "acquireSyncLease").mockImplementation(async () => { if (leaseHeld) return null; leaseHeld = true; return "lease-token"; });
+    vi.spyOn(db, "releaseSyncLease").mockImplementation(async () => { leaseHeld = false; return true; });
     vi.spyOn(db, "createAudienceSnapshot").mockResolvedValue();
     vi.spyOn(db, "updateConnectedChannel").mockResolvedValue();
     const fetchSnapshot = vi.spyOn(providers, "fetchAggregateSnapshot").mockImplementation(async () => {

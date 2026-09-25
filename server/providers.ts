@@ -12,8 +12,6 @@ type ProviderConfig = {
 };
 
 export type ProviderCredentials = { clientId: string; clientSecret: string; scopes?: string[] };
-type ProviderStateRecord = { userId?: number; provider?: Provider; expiresAt: number };
-const providerStates = new Map<string, ProviderStateRecord>();
 
 export class ProviderApiError extends Error {
   constructor(public readonly status: number, message: string, public readonly retryAfterMs?: number) {
@@ -87,17 +85,8 @@ export function assertProviderConfigured(provider: Provider, credentials?: Provi
   return config;
 }
 
-export function createProviderState(metadata: { userId?: number; provider?: Provider } = {}) {
-  const state = randomBytes(32).toString("base64url");
-  providerStates.set(state, { ...metadata, expiresAt: Date.now() + 10 * 60 * 1000 });
-  return state;
-}
-export function consumeProviderState(state: string, expected: { userId?: number; provider?: Provider }) {
-  const record = providerStates.get(state);
-  providerStates.delete(state);
-  if (!record || record.expiresAt <= Date.now()) return false;
-  if (record.userId !== expected.userId || record.provider !== expected.provider) return false;
-  return true;
+export function createProviderState() {
+  return randomBytes(32).toString("base64url");
 }
 
 export function buildProviderAuthorizationUrl(provider: Provider, redirectUri: string, state: string, credentials?: ProviderCredentials) {

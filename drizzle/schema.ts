@@ -1,4 +1,4 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, json, bigint, index, uniqueIndex } from "drizzle-orm/mysql-core";
+import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, json, bigint, index, uniqueIndex, primaryKey } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
@@ -26,6 +26,23 @@ export const users = mysqlTable("users", {
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
+
+export const oauthStates = mysqlTable("oauth_states", {
+  state: varchar("state", { length: 128 }).primaryKey(),
+  userId: int("userId").notNull(),
+  provider: varchar("provider", { length: 32 }).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [index("oauth_states_expiry_idx").on(table.expiresAt), index("oauth_states_user_provider_idx").on(table.userId, table.provider)]);
+
+export const syncLeases = mysqlTable("sync_leases", {
+  userId: int("userId").notNull(),
+  provider: varchar("provider", { length: 32 }).notNull(),
+  leaseToken: varchar("leaseToken", { length: 128 }).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [primaryKey({ columns: [table.userId, table.provider] }), index("sync_leases_expiry_idx").on(table.expiresAt)]);
 
 export const audienceSnapshots = mysqlTable("audience_snapshots", {
   id: int("id").autoincrement().primaryKey(),
@@ -109,3 +126,5 @@ export type AnalysisRun = typeof analysisRuns.$inferSelect;
 export type ConnectedChannel = typeof connectedChannels.$inferSelect;
 export type ContentAsset = typeof contentAssets.$inferSelect;
 export type EvidenceEvent = typeof evidenceEvents.$inferSelect;
+export type OAuthState = typeof oauthStates.$inferSelect;
+export type SyncLease = typeof syncLeases.$inferSelect;

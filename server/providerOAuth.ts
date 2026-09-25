@@ -2,7 +2,7 @@ import { parse as parseCookieHeader } from "cookie";
 import type { Express, Request, Response } from "express";
 import { createContext } from "./_core/context";
 import * as db from "./db";
-import { consumeProviderState, decryptSecret, encryptSecret, exchangeProviderCode, Provider, ProviderCredentials, refreshProviderToken } from "./providers";
+import { decryptSecret, encryptSecret, exchangeProviderCode, Provider, ProviderCredentials, refreshProviderToken } from "./providers";
 import { ENV } from "./_core/env";
 
 const STATE_COOKIE = "__Host-provider_oauth_state";
@@ -49,7 +49,7 @@ export function registerProviderOAuthRoutes(app: Express) {
         res.redirect("/?connection_error=origin_not_allowed");
         return;
       }
-      if (!consumeProviderState(state, { userId: context.user.id, provider })) {
+      if (!await db.consumeOAuthState(state, context.user.id, provider)) {
         res.status(403).json({ error: "Expired, replayed, or mismatched provider OAuth state." });
         return;
       }

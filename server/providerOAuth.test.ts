@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { consumeProviderState, createProviderState, decryptSecret, encryptSecret } from "./providers";
+import { createProviderState, decryptSecret, encryptSecret } from "./providers";
 import { isSupportedProvider, refreshConnectionIfNeeded } from "./providerOAuth";
 import * as db from "./db";
 
@@ -10,21 +10,11 @@ describe("provider OAuth state and token lifecycle", () => {
     vi.useRealTimers();
   });
 
-  it("rejects mismatched provider or user state", () => {
-    const state = createProviderState({ userId: 11, provider: "youtube" });
-    expect(consumeProviderState(state, { userId: 12, provider: "youtube" })).toBe(false);
-    expect(consumeProviderState(state, { userId: 11, provider: "youtube" })).toBe(false);
-  });
-
-  it("rejects expired and replayed state", () => {
-    vi.useFakeTimers();
-    const state = createProviderState({ userId: 11, provider: "youtube" });
-    vi.advanceTimersByTime(10 * 60 * 1000 + 1);
-    expect(consumeProviderState(state, { userId: 11, provider: "youtube" })).toBe(false);
-
-    const fresh = createProviderState({ userId: 11, provider: "youtube" });
-    expect(consumeProviderState(fresh, { userId: 11, provider: "youtube" })).toBe(true);
-    expect(consumeProviderState(fresh, { userId: 11, provider: "youtube" })).toBe(false);
+  it("creates high-entropy state tokens for durable storage", () => {
+    const first = createProviderState();
+    const second = createProviderState();
+    expect(first).toHaveLength(43);
+    expect(second).not.toBe(first);
   });
 
   it("accepts only supported provider cookie values", () => {

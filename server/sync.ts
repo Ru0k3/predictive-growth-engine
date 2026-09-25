@@ -5,7 +5,7 @@ import { refreshConnectionIfNeeded } from "./providerOAuth";
 const MAX_ATTEMPTS = 3;
 const MIN_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_BACKOFF_MS = 30 * 1000;
-const activeSyncs = new Set<string>();
+const LEASE_DURATION_MS = 2 * 60 * 1000;
 
 export type SyncResult = {
   provider: string;
@@ -50,9 +50,8 @@ export async function syncConnectedChannel(
   if (!options.force && channel.lastSyncedAt && Date.now() - channel.lastSyncedAt.getTime() < MIN_SYNC_INTERVAL_MS) {
     return { provider, ok: true, skipped: true };
   }
-  const lockKey = `${userId}:${provider}`;
-  if (activeSyncs.has(lockKey)) return { provider, ok: true, skipped: true };
-  activeSyncs.add(lockKey);
+  const leaseToken = await db.acquireSyncLease(userId, provider, LEASE_DURATION_MS);
+  if (!leaseToken) return { provider, ok: true, skipped: true };
 
   try {
     const refreshed = await withRetry(() => refreshConnectionIfNeeded(channel, credentials));
@@ -80,7 +79,7 @@ export async function syncConnectedChannel(
     await db.updateConnectedChannel(channel.id, { status: "error", lastError: errorMessage(error) }).catch(() => undefined);
     return { provider, ok: false, error: errorMessage(error) };
   } finally {
-    activeSyncs.delete(lockKey);
+    await db.releaseSyncLease(userId, provider, leaseToken).catch(() => undefined);
   }
 }
 
@@ -97,4 +96,5 @@ export const syncPolicy = {
   maxAttempts: MAX_ATTEMPTS,
   minIntervalMs: MIN_SYNC_INTERVAL_MS,
   maxBackoffMs: MAX_BACKOFF_MS,
+  leaseDurationMs: LEASE_DURATION_MS,
 };

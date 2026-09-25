@@ -1,6 +1,7 @@
+import { randomBytes } from "node:crypto";
 import { desc, eq, and, gt, lt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots, providerSettings } from "../drizzle/schema";
+import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots, providerSettings, oauthStates, syncLeases } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -89,6 +90,19 @@ export async function getUserByOpenId(openId: string) {
   return result.length > 0 ? result[0] : undefined;
 }
 
+export async function createOAuthState(values: { state: string; userId: number; provider: string; expiresAt: Date }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  await db.insert(oauthStates).values({ ...values, createdAt: new Date() });
+}
+
+export async function consumeOAuthState(state: string, userId: number, provider: string) {
+  const db = await getDb();
+  if (!db) return false;
+  const result = await db.delete(oauthStates).where(and(eq(oauthStates.state, state), eq(oauthStates.userId, userId), eq(oauthStates.provider, provider), gt(oauthStates.expiresAt, new Date())));
+  return Number(result[0]?.affectedRows ?? 0) === 1;
+}
+
 export async function listConnectedChannels(userId: number) {
   const db = await getDb();
   if (!db) return [];
@@ -103,6 +117,31 @@ export async function listConnectedChannels(userId: number) {
     status: connectedChannels.status,
     lastError: connectedChannels.lastError,
   }).from(connectedChannels).where(eq(connectedChannels.userId, userId)).orderBy(desc(connectedChannels.updatedAt));
+}
+
+export async function acquireSyncLease(userId: number, provider: string, durationMs: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is not available");
+  const now = new Date();
+  const expiresAt = new Date(Date.now() + durationMs);
+  const leaseToken = randomBytes(32).toString("base64url");
+  const updated = await db.update(syncLeases).set({ leaseToken, expiresAt, updatedAt: now }).where(and(eq(syncLeases.userId, userId), eq(syncLeases.provider, provider), lt(syncLeases.expiresAt, now)));
+  if (Number(updated[0]?.affectedRows ?? 0) === 1) return leaseToken;
+  try {
+    await db.insert(syncLeases).values({ userId, provider, leaseToken, expiresAt, createdAt: now, updatedAt: now });
+    return leaseToken;
+  } catch (error) {
+    const duplicate = error as { code?: string; errno?: number };
+    if (duplicate.code === "ER_DUP_ENTRY" || duplicate.errno === 1062) return null;
+    throw error;
+  }
+}
+
+export async function releaseSyncLease(userId: number, provider: string, leaseToken: string) {
+  const db = await getDb();
+  if (!db) return false;
+  const result = await db.delete(syncLeases).where(and(eq(syncLeases.userId, userId), eq(syncLeases.provider, provider), eq(syncLeases.leaseToken, leaseToken)));
+  return Number(result[0]?.affectedRows ?? 0) === 1;
 }
 
 export async function createAudienceSnapshot(values: typeof audienceSnapshots.$inferInsert) {

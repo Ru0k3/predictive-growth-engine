@@ -152,7 +152,8 @@ export const appRouter = router({
     list: publicProcedure.query(async ({ ctx }) => ctx.user ? db.listConnectedChannels(ctx.user.id) : []),
     start: protectedProcedure.input(z.object({ provider: z.enum(["youtube", "instagram", "tiktok"]), origin: z.string().url() })).mutation(async ({ ctx, input }) => {
       if (!isAllowedAppOrigin(input.origin, ctx.req)) throw new Error("OAuth origin is not allowed.");
-      const state = createProviderState({ userId: ctx.user.id, provider: input.provider });
+      const state = createProviderState();
+      await db.createOAuthState({ state, userId: ctx.user.id, provider: input.provider, expiresAt: new Date(Date.now() + 10 * 60 * 1000) });
       const redirectUri = `${input.origin}/api/provider-oauth/callback`;
       const url = buildProviderAuthorizationUrl(input.provider, redirectUri, state, await userProviderCredentials(ctx.user.id, input.provider));
       ctx.res.cookie("__Host-provider_oauth_state", state, { httpOnly: true, secure: true, sameSite: "none", path: "/", maxAge: 10 * 60 * 1000 });
