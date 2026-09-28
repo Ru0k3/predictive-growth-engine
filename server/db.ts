@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { desc, eq, and, gt, lt } from "drizzle-orm";
+import { desc, eq, and, gt, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots, providerSettings, oauthStates, syncLeases } from "../drizzle/schema";
 import { ENV } from './_core/env';
@@ -142,6 +142,24 @@ export async function releaseSyncLease(userId: number, provider: string, leaseTo
   if (!db) return false;
   const result = await db.delete(syncLeases).where(and(eq(syncLeases.userId, userId), eq(syncLeases.provider, provider), eq(syncLeases.leaseToken, leaseToken)));
   return Number(result[0]?.affectedRows ?? 0) === 1;
+}
+
+export async function renewSyncLease(userId: number, provider: string, leaseToken: string, durationMs: number) {
+  const db = await getDb();
+  if (!db) return false;
+  const now = new Date();
+  const result = await db.update(syncLeases).set({ expiresAt: new Date(Date.now() + durationMs), updatedAt: now }).where(and(eq(syncLeases.userId, userId), eq(syncLeases.provider, provider), eq(syncLeases.leaseToken, leaseToken), gt(syncLeases.expiresAt, now)));
+  return Number(result[0]?.affectedRows ?? 0) === 1;
+}
+
+export async function cleanupExpiredCoordinationRecords(limit = 100) {
+  const db = await getDb();
+  if (!db) return { oauthStates: 0, syncLeases: 0 };
+  const boundedLimit = Math.max(1, Math.min(Math.floor(limit), 1000));
+  const now = new Date();
+  const oauthResult = await db.execute(sql`DELETE FROM ${oauthStates} WHERE ${oauthStates.expiresAt} <= ${now} LIMIT ${boundedLimit}`);
+  const leaseResult = await db.execute(sql`DELETE FROM ${syncLeases} WHERE ${syncLeases.expiresAt} <= ${now} LIMIT ${boundedLimit}`);
+  return { oauthStates: Number((oauthResult as any)[0]?.affectedRows ?? 0), syncLeases: Number((leaseResult as any)[0]?.affectedRows ?? 0) };
 }
 
 export async function createAudienceSnapshot(values: typeof audienceSnapshots.$inferInsert) {

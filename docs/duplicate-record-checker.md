@@ -39,3 +39,18 @@ Run this before applying migrations `0005` and `0006`. Do not apply the unique c
 The script also checks `oauth_states` and `sync_leases`, which are created by migration `0006`. On a pre-0006 database, use the default mode to see missing-table warnings; use `--strict` when validating that the full distributed-state migration is complete.
 
 The script supports PostgreSQL query syntax and the quoted camelCase identifiers produced by the current Drizzle schema. The application itself currently uses `mysql2`; PostgreSQL mode is intended for a compatible local/staging schema or a future PostgreSQL adapter, not as a claim that the current application database driver supports PostgreSQL.
+
+## Distributed coordination integration tests
+
+`server/distributed.integration.test.ts` is an opt-in real-database suite. It uses the application's MySQL/TiDB adapter and requires `TEST_DATABASE_URL` or `DATABASE_URL`:
+
+```bash
+TEST_DATABASE_URL='mysql://user:password@127.0.0.1:3306/signal_test' \
+  pnpm vitest run server/distributed.integration.test.ts
+```
+
+The target must already contain migrations `0005` and `0006`. Tests use a generated test user ID and delete only their own rows before and after execution. Without a test database URL, the suite is skipped rather than falsely reported as an end-to-end pass.
+
+The scheduled sync callback invokes `cleanupExpiredCoordinationRecords(100)` before processing a user. Cleanup is bounded to 100 expired OAuth-state rows and 100 expired sync-lease rows per callback, is safe to repeat, and logs failures without interrupting provider synchronization. Active leases and unexpired OAuth states are not deleted.
+
+Sync leases last two minutes in production and renew every 30 seconds. Renewal requires the user, provider, and current lease token and uses an atomic update that also requires the lease to remain unexpired. If renewal fails, the worker stops before writing the provider snapshot. Test-only lease-duration and heartbeat-interval options allow long-running behavior to be tested without real two-minute sleeps.

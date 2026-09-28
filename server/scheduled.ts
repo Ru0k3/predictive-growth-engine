@@ -14,6 +14,11 @@ export function registerScheduledRoutes(app: Express) {
     try {
       const cronUser = await sdk.authenticateRequest(req);
       if (!cronUser.isCron || !cronUser.taskUid) return res.status(403).json({ error: "cron-only" });
+      try {
+        await db.cleanupExpiredCoordinationRecords(100);
+      } catch (cleanupError) {
+        console.warn("[Coordination cleanup] failed", cleanupError instanceof Error ? cleanupError.message : "unknown error");
+      }
       const user = await db.getUserByScheduleTaskUid(cronUser.taskUid);
       if (!user) return res.json({ ok: true, skipped: "orphan" });
       const results = await syncUserChannels(user.id, (provider) => credentialsFor(user.id, provider));

@@ -6,6 +6,14 @@ const MAX_ATTEMPTS = 3;
 const MIN_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_BACKOFF_MS = 30 * 1000;
 const LEASE_DURATION_MS = 2 * 60 * 1000;
+const LEASE_RENEWAL_INTERVAL_MS = 30 * 1000;
+
+class LeaseOwnershipLostError extends Error {
+  constructor() {
+    super("Sync lease ownership was lost before the provider result could be persisted.");
+    this.name = "LeaseOwnershipLostError";
+  }
+}
 
 export type SyncResult = {
   provider: string;
@@ -43,19 +51,41 @@ export async function syncConnectedChannel(
   userId: number,
   provider: Provider,
   credentials?: ProviderCredentials,
-  options: { force?: boolean } = {},
+  options: { force?: boolean; leaseDurationMs?: number; leaseRenewalIntervalMs?: number } = {},
 ): Promise<SyncResult> {
   const channel = await db.getConnectedChannel(userId, provider);
   if (!channel) return { provider, ok: false, error: "Connected channel not found." };
   if (!options.force && channel.lastSyncedAt && Date.now() - channel.lastSyncedAt.getTime() < MIN_SYNC_INTERVAL_MS) {
     return { provider, ok: true, skipped: true };
   }
-  const leaseToken = await db.acquireSyncLease(userId, provider, LEASE_DURATION_MS);
+  const leaseDurationMs = options.leaseDurationMs ?? LEASE_DURATION_MS;
+  const leaseRenewalIntervalMs = options.leaseRenewalIntervalMs ?? Math.min(LEASE_RENEWAL_INTERVAL_MS, Math.floor(leaseDurationMs / 2));
+  const leaseToken = await db.acquireSyncLease(userId, provider, leaseDurationMs);
   if (!leaseToken) return { provider, ok: true, skipped: true };
+  let leaseLost = false;
+  let renewalInFlight = false;
+  const renewLease = async () => {
+    if (leaseLost || renewalInFlight) return;
+    renewalInFlight = true;
+    try {
+      if (!await db.renewSyncLease(userId, provider, leaseToken, leaseDurationMs)) leaseLost = true;
+    } catch {
+      leaseLost = true;
+    } finally {
+      renewalInFlight = false;
+    }
+  };
+  const heartbeat = setInterval(() => { void renewLease(); }, leaseRenewalIntervalMs);
+  heartbeat.unref?.();
+  const ensureOwnership = () => {
+    if (leaseLost) throw new LeaseOwnershipLostError();
+  };
 
   try {
     const refreshed = await withRetry(() => refreshConnectionIfNeeded(channel, credentials));
+    ensureOwnership();
     const snapshot = await withRetry(() => fetchAggregateSnapshot(provider, decryptSecret(refreshed.accessTokenEncrypted)));
+    ensureOwnership();
     await db.createAudienceSnapshot({
       userId,
       channel: snapshot.provider,
@@ -68,6 +98,7 @@ export async function syncConnectedChannel(
       source: snapshot.source,
       createdAt: new Date(),
     });
+    ensureOwnership();
     await db.updateConnectedChannel(channel.id, {
       accountName: snapshot.accountName,
       lastSyncedAt: new Date(),
@@ -76,9 +107,10 @@ export async function syncConnectedChannel(
     });
     return { provider, ok: true };
   } catch (error) {
-    await db.updateConnectedChannel(channel.id, { status: "error", lastError: errorMessage(error) }).catch(() => undefined);
+    if (!leaseLost) await db.updateConnectedChannel(channel.id, { status: "error", lastError: errorMessage(error) }).catch(() => undefined);
     return { provider, ok: false, error: errorMessage(error) };
   } finally {
+    clearInterval(heartbeat);
     await db.releaseSyncLease(userId, provider, leaseToken).catch(() => undefined);
   }
 }
@@ -97,4 +129,5 @@ export const syncPolicy = {
   minIntervalMs: MIN_SYNC_INTERVAL_MS,
   maxBackoffMs: MAX_BACKOFF_MS,
   leaseDurationMs: LEASE_DURATION_MS,
+  leaseRenewalIntervalMs: LEASE_RENEWAL_INTERVAL_MS,
 };
