@@ -44,6 +44,14 @@ export const syncLeases = mysqlTable("sync_leases", {
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => [primaryKey({ columns: [table.userId, table.provider] }), index("sync_leases_expiry_idx").on(table.expiresAt)]);
 
+export const maintenanceLeases = mysqlTable("maintenance_leases", {
+  lockName: varchar("lockName", { length: 64 }).primaryKey(),
+  leaseToken: varchar("leaseToken", { length: 128 }).notNull(),
+  expiresAt: timestamp("expiresAt").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [index("maintenance_leases_expiry_idx").on(table.expiresAt)]);
+
 export const audienceSnapshots = mysqlTable("audience_snapshots", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull(),
@@ -128,3 +136,4 @@ export type ContentAsset = typeof contentAssets.$inferSelect;
 export type EvidenceEvent = typeof evidenceEvents.$inferSelect;
 export type OAuthState = typeof oauthStates.$inferSelect;
 export type SyncLease = typeof syncLeases.$inferSelect;
+export type MaintenanceLease = typeof maintenanceLeases.$inferSelect;

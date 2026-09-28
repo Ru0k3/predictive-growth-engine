@@ -21,7 +21,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-TABLES = ["connected_channels", "provider_settings", "oauth_states", "sync_leases"]
+TABLES = ["connected_channels", "provider_settings", "oauth_states", "sync_leases", "maintenance_leases"]
 
 DUPLICATE_CHECKS = {
     "connected_channels_by_user_provider": (
@@ -42,6 +42,10 @@ DUPLICATE_CHECKS = {
         'SELECT "userId", "provider", COUNT(*) AS copies FROM "sync_leases" '
         'GROUP BY "userId", "provider" HAVING COUNT(*) > 1'
     ),
+    "maintenance_leases_by_lock_name": (
+        'SELECT "lockName", COUNT(*) AS copies FROM "maintenance_leases" '
+        'GROUP BY "lockName" HAVING COUNT(*) > 1'
+    ),
 }
 
 HYGIENE_CHECKS = {
@@ -50,6 +54,9 @@ HYGIENE_CHECKS = {
     ),
     "expired_sync_leases": (
         'SELECT COUNT(*) AS count FROM "sync_leases" WHERE "expiresAt" <= CURRENT_TIMESTAMP'
+    ),
+    "expired_maintenance_leases": (
+        'SELECT COUNT(*) AS count FROM "maintenance_leases" WHERE "expiresAt" <= CURRENT_TIMESTAMP'
     ),
     "orphaned_oauth_states": (
         'SELECT COUNT(*) AS count FROM "oauth_states" s '
@@ -131,6 +138,7 @@ def execute_postgres(url: str, query: str, name: str) -> list[dict[str, Any]]:
     aliases = {
         "expired_oauth_states": 'SELECT COUNT(*) AS count FROM "oauth_states" WHERE "expiresAt" <= CURRENT_TIMESTAMP',
         "expired_sync_leases": 'SELECT COUNT(*) AS count FROM "sync_leases" WHERE "expiresAt" <= CURRENT_TIMESTAMP',
+        "expired_maintenance_leases": 'SELECT COUNT(*) AS count FROM "maintenance_leases" WHERE "expiresAt" <= CURRENT_TIMESTAMP',
         "orphaned_oauth_states": 'SELECT COUNT(*) AS count FROM "oauth_states" s LEFT JOIN "users" u ON u."id" = s."userId" WHERE u."id" IS NULL',
         "orphaned_sync_leases": 'SELECT COUNT(*) AS count FROM "sync_leases" l LEFT JOIN "users" u ON u."id" = l."userId" WHERE u."id" IS NULL',
     }
@@ -172,7 +180,7 @@ def run_checks(backend: str, source: Any, strict: bool) -> dict[str, Any]:
             results.append(Result(f"table:{table}", [], "error", str(error)))
 
     for name, query in {**DUPLICATE_CHECKS, **HYGIENE_CHECKS}.items():
-        required_table = "oauth_states" if "oauth_states" in name else "sync_leases" if "sync_leases" in name else "connected_channels" if "connected_channels" in name else "provider_settings"
+        required_table = "oauth_states" if "oauth_states" in name else "maintenance_leases" if "maintenance_leases" in name else "sync_leases" if "sync_leases" in name else "connected_channels" if "connected_channels" in name else "provider_settings"
         if name.startswith("orphaned_") and "users" not in missing_tables:
             required_table = required_table
         if required_table in missing_tables or (name.startswith("orphaned_") and "users" in missing_tables):

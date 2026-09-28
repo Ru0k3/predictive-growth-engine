@@ -48,7 +48,7 @@ describe("controlled provider sync", () => {
     let leaseHeld = false;
     vi.spyOn(db, "acquireSyncLease").mockImplementation(async () => { if (leaseHeld) return null; leaseHeld = true; return "lease-token"; });
     vi.spyOn(db, "releaseSyncLease").mockImplementation(async () => { leaseHeld = false; return true; });
-    vi.spyOn(db, "createAudienceSnapshot").mockResolvedValue();
+    vi.spyOn(db, "persistSnapshotWithLease").mockResolvedValue(true);
     vi.spyOn(db, "updateConnectedChannel").mockResolvedValue();
     const fetchSnapshot = vi.spyOn(providers, "fetchAggregateSnapshot").mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -68,7 +68,7 @@ describe("controlled provider sync", () => {
     vi.spyOn(db, "acquireSyncLease").mockResolvedValue("lease-token");
     vi.spyOn(db, "renewSyncLease").mockResolvedValue(false);
     vi.spyOn(db, "releaseSyncLease").mockResolvedValue(false);
-    const createSnapshot = vi.spyOn(db, "createAudienceSnapshot").mockResolvedValue();
+    const persistSnapshot = vi.spyOn(db, "persistSnapshotWithLease").mockResolvedValue(true);
     vi.spyOn(db, "updateConnectedChannel").mockResolvedValue();
     vi.spyOn(providers, "fetchAggregateSnapshot").mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
@@ -76,6 +76,20 @@ describe("controlled provider sync", () => {
     });
     const result = await syncConnectedChannel(5, "youtube", undefined, { force: true, leaseDurationMs: 20, leaseRenewalIntervalMs: 5 });
     expect(result.ok).toBe(false);
-    expect(createSnapshot).not.toHaveBeenCalled();
+    expect(persistSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("does not update channel status when transactional lease validation rejects the write", async () => {
+    process.env.PROVIDER_TOKEN_ENCRYPTION_KEY = "sync-test-key";
+    vi.spyOn(db, "getConnectedChannel").mockResolvedValue({ id: 10, userId: 6, provider: "youtube", externalAccountId: "channel", accountName: "Channel", accessTokenEncrypted: encryptSecret("access"), refreshTokenEncrypted: null, accessTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), refreshTokenExpiresAt: null, scopes: null, lastSyncedAt: null, status: "connected", lastError: null, createdAt: new Date(), updatedAt: new Date() });
+    vi.spyOn(db, "acquireSyncLease").mockResolvedValue("lease-token");
+    vi.spyOn(db, "renewSyncLease").mockResolvedValue(true);
+    vi.spyOn(db, "releaseSyncLease").mockResolvedValue(true);
+    vi.spyOn(db, "persistSnapshotWithLease").mockResolvedValue(false);
+    const updateChannel = vi.spyOn(db, "updateConnectedChannel").mockResolvedValue();
+    vi.spyOn(providers, "fetchAggregateSnapshot").mockResolvedValue({ provider: "youtube", externalAccountId: "channel", accountName: "Channel", reach: 1, impressions: 1, followers: 1, engagement: 0, demographicVector: [], observedAt: new Date().toISOString(), source: "test" });
+    const result = await syncConnectedChannel(6, "youtube", undefined, { force: true, leaseDurationMs: 20, leaseRenewalIntervalMs: 5 });
+    expect(result.ok).toBe(false);
+    expect(updateChannel).not.toHaveBeenCalled();
   });
 });

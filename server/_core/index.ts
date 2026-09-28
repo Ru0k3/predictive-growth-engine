@@ -10,6 +10,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { registerScheduledRoutes } from "../scheduled";
 import { registerReportRoutes } from "../reports";
+import { startCoordinationCleanupScheduler } from "../coordinationCleanup";
 import { serveStatic, setupVite } from "./vite";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -66,6 +67,7 @@ async function startServer() {
 
   server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}/`);
+    startCoordinationCleanupScheduler();
   });
 }
 

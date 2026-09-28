@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { desc, eq, and, gt, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots, providerSettings, oauthStates, syncLeases } from "../drizzle/schema";
+import { InsertUser, users, connectedChannels, contentAssets, evidenceEvents, audienceSnapshots, providerSettings, oauthStates, syncLeases, maintenanceLeases } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -152,14 +152,61 @@ export async function renewSyncLease(userId: number, provider: string, leaseToke
   return Number(result[0]?.affectedRows ?? 0) === 1;
 }
 
+async function acquireMaintenanceLease(lockName: string, durationMs: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const now = new Date();
+  const expiresAt = new Date(Date.now() + durationMs);
+  const leaseToken = randomBytes(32).toString("base64url");
+  const updated = await db.update(maintenanceLeases).set({ leaseToken, expiresAt, updatedAt: now }).where(and(eq(maintenanceLeases.lockName, lockName), lt(maintenanceLeases.expiresAt, now)));
+  if (Number(updated[0]?.affectedRows ?? 0) === 1) return leaseToken;
+  try {
+    await db.insert(maintenanceLeases).values({ lockName, leaseToken, expiresAt, createdAt: now, updatedAt: now });
+    return leaseToken;
+  } catch (error) {
+    const duplicate = error as { code?: string; errno?: number };
+    if (duplicate.code === "ER_DUP_ENTRY" || duplicate.errno === 1062) return null;
+    throw error;
+  }
+}
+
+async function releaseMaintenanceLease(lockName: string, leaseToken: string) {
+  const db = await getDb();
+  if (!db) return false;
+  const result = await db.delete(maintenanceLeases).where(and(eq(maintenanceLeases.lockName, lockName), eq(maintenanceLeases.leaseToken, leaseToken)));
+  return Number(result[0]?.affectedRows ?? 0) === 1;
+}
+
 export async function cleanupExpiredCoordinationRecords(limit = 100) {
   const db = await getDb();
   if (!db) return { oauthStates: 0, syncLeases: 0 };
   const boundedLimit = Math.max(1, Math.min(Math.floor(limit), 1000));
+  const leaseToken = await acquireMaintenanceLease("coordination-cleanup", 5 * 60 * 1000);
+  if (!leaseToken) return { oauthStates: 0, syncLeases: 0 };
   const now = new Date();
-  const oauthResult = await db.execute(sql`DELETE FROM ${oauthStates} WHERE ${oauthStates.expiresAt} <= ${now} LIMIT ${boundedLimit}`);
-  const leaseResult = await db.execute(sql`DELETE FROM ${syncLeases} WHERE ${syncLeases.expiresAt} <= ${now} LIMIT ${boundedLimit}`);
-  return { oauthStates: Number((oauthResult as any)[0]?.affectedRows ?? 0), syncLeases: Number((leaseResult as any)[0]?.affectedRows ?? 0) };
+  try {
+    const oauthResult = await db.execute(sql`DELETE FROM ${oauthStates} WHERE ${oauthStates.expiresAt} <= ${now} LIMIT ${boundedLimit}`);
+    const leaseResult = await db.execute(sql`DELETE FROM ${syncLeases} WHERE ${syncLeases.expiresAt} <= ${now} LIMIT ${boundedLimit}`);
+    return { oauthStates: Number((oauthResult as any)[0]?.affectedRows ?? 0), syncLeases: Number((leaseResult as any)[0]?.affectedRows ?? 0) };
+  } finally {
+    await releaseMaintenanceLease("coordination-cleanup", leaseToken).catch(() => undefined);
+  }
+}
+
+export async function persistSnapshotWithLease(values: typeof audienceSnapshots.$inferInsert, channelId: number, userId: number, provider: string, leaseToken: string, accountName: string) {
+  const db = await getDb();
+  if (!db) return false;
+  return db.transaction(async (tx) => {
+    const leases = await tx.select({ leaseToken: syncLeases.leaseToken, expiresAt: syncLeases.expiresAt })
+      .from(syncLeases)
+      .where(and(eq(syncLeases.userId, userId), eq(syncLeases.provider, provider), eq(syncLeases.leaseToken, leaseToken), gt(syncLeases.expiresAt, new Date())))
+      .limit(1)
+      .for("update");
+    if (leases.length !== 1) return false;
+    await tx.insert(audienceSnapshots).values(values);
+    await tx.update(connectedChannels).set({ accountName, lastSyncedAt: new Date(), status: "connected", lastError: null, updatedAt: new Date() }).where(and(eq(connectedChannels.id, channelId), eq(connectedChannels.userId, userId), eq(connectedChannels.provider, provider)));
+    return true;
+  });
 }
 
 export async function createAudienceSnapshot(values: typeof audienceSnapshots.$inferInsert) {

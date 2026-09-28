@@ -22,7 +22,7 @@ This sandbox has none of these values configured, so no real provider or target-
 ### Release-blocking risks
 
 - **Provider credentials and app approval:** YouTube, Instagram, and TikTok OAuth cannot be declared production-ready until each provider has real staging credentials, exact redirect URI registration, approved scopes, and a test account with the required account type.
-- **Database migration safety:** Migration `0005_stable_signal.sql` adds a `lastError` column and uniqueness constraints. It will fail if existing data contains duplicate `(userId, provider)` rows. Run the preflight queries below before applying it.
+- **Database migration safety:** Migrations `0005_stable_signal.sql`, `0006_distributed_state_leases.sql`, and `0007_maintenance_cleanup_lease.sql` add status, durable coordination, and cleanup-lock structures. The unique constraints will fail if existing data contains duplicate `(userId, provider)` rows. Run the preflight queries below before applying them.
 - **OAuth redirect trust:** The OAuth start procedure accepts a browser-provided origin. Before production release, enforce an allowlist or derive the callback origin from the trusted request host/proxy configuration. Never permit arbitrary redirect origins.
 - **Provider API contract verification:** Aggregate metrics differ by provider. Live staging calls must confirm that reach, impressions, followers, engagement, and retention are mapped only when the provider actually exposes those metrics.
 - **Background job ownership:** Every scheduled task must be tied to one user and one task UID. Orphaned tasks, duplicate task creation, and a disabled task that remains persisted must be reconciled during rollout.
@@ -32,19 +32,20 @@ This sandbox has none of these values configured, so no real provider or target-
 - **Token lifecycle:** Refresh-token rotation, expired refresh tokens, revoked consent, and provider-specific refresh failures need staging verification and user-facing recovery instructions.
 - **Rate limits and outages:** The worker retries only retryable statuses with bounded backoff. Persistent 401/403/400 errors must remain visible in `connected_channels.status` and `lastError`; do not retry them indefinitely.
 - **Snapshot freshness:** Dashboard values are now snapshot-only. The UI must show `awaiting background sync`, persisted snapshot time, and provider error states rather than silently calling external APIs.
-- **Duplicate snapshots:** The worker applies a five-minute minimum interval for scheduled work. Production should monitor snapshot volume and add a database-level deduplication key if multiple workers can run concurrently.
+- **Duplicate snapshots:** The worker applies a five-minute minimum interval and writes snapshots only inside a lease-validated transaction. Production should still monitor snapshot volume and provider request amplification.
 - **Migration rollback:** The `lastError` column is additive and can be rolled back safely. Unique constraints require removing or merging duplicate rows before rollback/retry.
 - **Data deletion and backup:** Confirm backups, restore testing, user deletion behavior, encrypted-token destruction, and provider disconnect/revocation procedures before onboarding real customers.
 - **Observability:** Add alerts for repeated provider errors, stale snapshots, failed heartbeat callbacks, refresh-token failures, and unusual snapshot volume. Logs must not include access tokens, refresh tokens, client secrets, or authorization codes.
 
 ## 2. Database-backed distributed state and lease design
 
-This implementation uses the existing MySQL/TiDB database rather than introducing Redis. Migration `0006_distributed_state_leases.sql` creates two tables:
+This implementation uses the existing MySQL/TiDB database rather than introducing Redis. Migrations `0006_distributed_state_leases.sql` and `0007_maintenance_cleanup_lease.sql` create the coordination tables:
 
 - `oauth_states`: stores a random state token, authenticated user, provider, creation time, and ten-minute expiry. Callback consumption is an atomic `DELETE` requiring the state, user, provider, and a future expiry, so a state can succeed only once and cannot be transferred between users/providers.
 - `sync_leases`: has a primary key on `(userId, provider)`, a random lease token, and expiry. Acquisition first conditionally replaces an expired lease, otherwise attempts an insert. A duplicate-key result means another worker owns the lease. Release deletes only when the lease token matches, so an old worker cannot release a newer worker's lease.
+- `maintenance_leases`: has a lock-name primary key and serializes cleanup across application instances.
 
-The lease duration is two minutes and must exceed the expected provider request plus bounded retry window. If a worker crashes, another worker can take the lease after expiry. This is safe across application instances, unlike the previous process-local `Map`/`Set` implementation. The lease is not a heartbeat; if a sync can exceed two minutes in production, add lease renewal before increasing provider concurrency.
+The sync lease duration is two minutes and renews every 30 seconds. If a worker crashes, another worker can take the lease after expiry. Snapshot insertion and connected-channel success updates are performed in a short transaction that locks and validates the lease row before writing; provider calls remain outside the transaction.
 
 The database-backed design requires the migration before enabling multi-instance OAuth or sync workers. It also requires monitoring for expired lease takeovers, orphaned OAuth states, and database latency. A Redis implementation would be appropriate if the platform already operates Redis, using `SET key value NX PX` and a compare-and-delete Lua release; adding Redis is intentionally avoided here to keep the deployment dependency set unchanged.
 
@@ -53,7 +54,7 @@ The database-backed design requires the migration before enabling multi-instance
 ### Preflight in a staging clone
 
 1. Take a current database backup and verify that it can be restored to an isolated database.
-2. Confirm the deployed application is at or before the commit that introduces migrations 0005 and 0006.
+2. Confirm the deployed application is at or before the commit that introduces migrations 0005, 0006, and 0007.
 3. Check for duplicates:
 
 ```sql
@@ -73,7 +74,7 @@ The migration and schema must remain aligned before deployment: `connected_chann
 4. For each duplicate connected channel, retain the newest valid token/account row, revoke or remove stale rows, and preserve the most recent `lastSyncedAt`/status where appropriate.
 5. For duplicate provider settings, retain the newest row. Never print decrypted credentials while resolving duplicates.
 6. Confirm the database user can run `ALTER TABLE`, create indexes, and read/write the affected tables.
-7. Apply migrations 0005 and 0006 to staging using the repository migration mechanism. Do not use an ad-hoc schema push against production.
+7. Apply migrations 0005, 0006, and 0007 to staging using the repository migration mechanism. Do not use an ad-hoc schema push against production.
 8. Verify:
 
 ```sql
@@ -84,6 +85,8 @@ SHOW COLUMNS FROM oauth_states;
 SHOW INDEX FROM oauth_states;
 SHOW COLUMNS FROM sync_leases;
 SHOW INDEX FROM sync_leases;
+SHOW COLUMNS FROM maintenance_leases;
+SHOW INDEX FROM maintenance_leases;
 ```
 
 9. Run application tests, authenticated snapshot reads, manual sync, scheduled sync, disconnect, and provider-not-configured checks against staging.
@@ -93,7 +96,7 @@ SHOW INDEX FROM sync_leases;
 1. Announce a short sync maintenance window; dashboard reads can remain available because the migration is additive, but pause scheduled sync during the DDL if the database provider requires it.
 2. Take and verify a production backup immediately before migration.
 3. Confirm no duplicate preflight rows remain.
-4. Apply `drizzle/0005_stable_signal.sql` and `drizzle/0006_distributed_state_leases.sql` exactly once through the deployment migration runner.
+4. Apply `drizzle/0005_stable_signal.sql`, `drizzle/0006_distributed_state_leases.sql`, and `drizzle/0007_maintenance_cleanup_lease.sql` exactly once through the deployment migration runner.
 5. Verify the column and indexes, then deploy the application commit containing the snapshot-only dashboard and shared worker.
 6. Re-enable heartbeat schedules gradually, starting with one internal/staging user and then a small production cohort.
 7. Confirm each cohort receives one snapshot per provider, errors persist without token leakage, and dashboard freshness advances after the worker runs.

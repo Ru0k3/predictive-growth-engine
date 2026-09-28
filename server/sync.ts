@@ -86,7 +86,7 @@ export async function syncConnectedChannel(
     ensureOwnership();
     const snapshot = await withRetry(() => fetchAggregateSnapshot(provider, decryptSecret(refreshed.accessTokenEncrypted)));
     ensureOwnership();
-    await db.createAudienceSnapshot({
+    const persisted = await db.persistSnapshotWithLease({
       userId,
       channel: snapshot.provider,
       reach: snapshot.reach,
@@ -97,14 +97,11 @@ export async function syncConnectedChannel(
       observedAt: new Date(snapshot.observedAt),
       source: snapshot.source,
       createdAt: new Date(),
-    });
-    ensureOwnership();
-    await db.updateConnectedChannel(channel.id, {
-      accountName: snapshot.accountName,
-      lastSyncedAt: new Date(),
-      status: "connected",
-      lastError: null,
-    });
+    }, channel.id, userId, provider, leaseToken, snapshot.accountName);
+    if (!persisted) {
+      leaseLost = true;
+      throw new LeaseOwnershipLostError();
+    }
     return { provider, ok: true };
   } catch (error) {
     if (!leaseLost) await db.updateConnectedChannel(channel.id, { status: "error", lastError: errorMessage(error) }).catch(() => undefined);
